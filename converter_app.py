@@ -10,13 +10,20 @@ class ConverterApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ANSYS → Abaqus Converter")
-        self.root.geometry("700x650")
+        self.root.geometry("700x750")
         self.root.resizable(False, False)
 
         self.db_path = tk.StringVar()
         self.output_dir = tk.StringVar()
         self.abaqus_cmd = tk.StringVar(value="abaqus")
         self.node_tol = tk.StringVar(value="1e-6")
+
+        # MAPDL launch settings
+        self.mapdl_version = tk.StringVar(value="")
+        self.nproc = tk.StringVar(value="2")
+        self.ram = tk.StringVar(value="")
+        self.license_type = tk.StringVar(value="(auto)")
+        self.extra_switches = tk.StringVar(value="")
 
         self._build_ui()
 
@@ -42,6 +49,28 @@ class ConverterApp:
 
         tk.Label(frm_set, text="Node Merge Tol:").grid(row=0, column=2, sticky="w", padx=(20, 0))
         tk.Entry(frm_set, textvariable=self.node_tol, width=12).grid(row=0, column=3, sticky="w", padx=5)
+
+        # --- MAPDL Launch Settings ---
+        frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
+        frm_mapdl.pack(fill="x", padx=10, pady=5)
+
+        tk.Label(frm_mapdl, text="Version (blank=auto):").grid(row=0, column=0, sticky="w")
+        tk.Entry(frm_mapdl, textvariable=self.mapdl_version, width=10).grid(row=0, column=1, sticky="w", padx=5)
+
+        tk.Label(frm_mapdl, text="Processors:").grid(row=0, column=2, sticky="w", padx=(15, 0))
+        tk.Entry(frm_mapdl, textvariable=self.nproc, width=6).grid(row=0, column=3, sticky="w", padx=5)
+
+        tk.Label(frm_mapdl, text="RAM MB (blank=auto):").grid(row=0, column=4, sticky="w", padx=(15, 0))
+        tk.Entry(frm_mapdl, textvariable=self.ram, width=8).grid(row=0, column=5, sticky="w", padx=5)
+
+        tk.Label(frm_mapdl, text="License Type:").grid(row=1, column=0, sticky="w", pady=(5, 0))
+        license_options = ["(auto)", "ansys", "mech", "struct", "dyna", "preppost", "enterprise"]
+        tk.OptionMenu(frm_mapdl, self.license_type, *license_options).grid(row=1, column=1, sticky="w", padx=5, pady=(5, 0))
+
+        tk.Label(frm_mapdl, text="Extra Switches:").grid(row=1, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
+        tk.Entry(frm_mapdl, textvariable=self.extra_switches, width=30).grid(
+            row=1, column=3, columnspan=3, sticky="w", padx=5, pady=(5, 0)
+        )
 
         # --- Step 3: Remove Blocks ---
         frm_blk = tk.LabelFrame(self.root, text="Step 3 - CDB Command Blocks to Remove (one per line)", padx=10, pady=5)
@@ -111,7 +140,23 @@ class ConverterApp:
         from ansys.mapdl.core import launch_mapdl
 
         out_dir = self.output_dir.get()
-        mapdl = launch_mapdl(run_location=out_dir, override=True)
+
+        version = self.mapdl_version.get().strip() or None
+        nproc = int(self.nproc.get().strip()) if self.nproc.get().strip() else 2
+        ram = int(self.ram.get().strip()) if self.ram.get().strip() else None
+        license_type = self.license_type.get().strip()
+        license_type = None if license_type == "(auto)" else license_type
+        extra_switches = self.extra_switches.get().strip() or ""
+
+        mapdl = launch_mapdl(
+            run_location=out_dir,
+            override=True,
+            version=version,
+            nproc=nproc,
+            ram=ram,
+            license_type=license_type,
+            additional_switches=extra_switches,
+        )
         self._log(f"MAPDL launched (v{mapdl.version})")
 
         try:
