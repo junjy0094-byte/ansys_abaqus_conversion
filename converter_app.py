@@ -209,7 +209,7 @@ class ConverterApp:
 
             # 넘버링 압축 (MAT 제외 - 물성 번호는 압축하지 않음)
             self._log("Compressing numbering...")
-            for entity in ["NODE", "ELEM", "REAL", "TYPE"]:
+            for entity in ["NODE", "ELEM"]:
                 mapdl.numcmp(entity)
 
             mapdl.allsel("ALL")
