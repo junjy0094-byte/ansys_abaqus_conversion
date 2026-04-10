@@ -251,10 +251,14 @@ class ConverterApp:
             return
 
         # ── 2) MPLIST → txt 파일로 추출 후 파싱 ──
+        #   PyMAPDL이 /OUTPUT를 가로채므로 매크로 파일로 우회
+        macro_path = os.path.join(mapdl.directory, "_dump_mplist.mac")
+        with open(macro_path, "w") as f:
+            f.write("/OUTPUT,_mplist,txt\n")
+            f.write("MPLIST,ALL\n")
+            f.write("/OUTPUT\n")
+        mapdl.input(macro_path)
         mplist_path = os.path.join(mapdl.directory, "_mplist.txt")
-        mapdl.run(f"/OUTPUT,'{mplist_path}'")
-        mapdl.run("MPLIST,ALL")
-        mapdl.run("/OUTPUT")
 
         all_mats = set()
         try:
