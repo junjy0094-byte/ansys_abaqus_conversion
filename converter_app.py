@@ -3,6 +3,7 @@ from tkinter import filedialog, scrolledtext, messagebox
 import threading
 import subprocess
 import os
+import re
 import shutil
 
 
@@ -259,10 +260,32 @@ class ConverterApp:
         all_mats = []
         mat_id = 0
         for _ in range(mat_count):
-            mat_id = int(mapdl.get("MID", "MAT", mat_id, "NXTH"))
+            try:
+                mapdl.run(f"*GET,_NXT_MAT,MAT,{mat_id},NXTH")
+                mat_id = int(float(mapdl.parameters["_NXT_MAT"]))
+            except Exception:
+                # fallback: mapdl.get() wrapper
+                try:
+                    mat_id = int(mapdl.get("_NXT_MAT", "MAT", mat_id, "NXTH"))
+                except Exception:
+                    break
             if mat_id == 0:
                 break
             all_mats.append(mat_id)
+
+        # fallback: *GET 순회 실패 시 MPLIST 파싱으로 수집
+        if not all_mats and mat_count > 0:
+            self._log(f"  *GET NXTH iteration returned 0 mats (expected {mat_count}), trying MPLIST fallback...")
+            try:
+                mp_output = mapdl.run("MPLIST,ALL,,,")
+                for line in mp_output.splitlines():
+                    m = re.match(r'\s*MATERIAL\s+NUMBER\s*=\s*(\d+)', line, re.IGNORECASE)
+                    if m:
+                        all_mats.append(int(m.group(1)))
+                # 중복 제거 및 정렬
+                all_mats = sorted(set(all_mats))
+            except Exception as e:
+                self._log(f"  MPLIST fallback also failed: {e}")
 
         self._log(f"  {len(all_mats)} material(s) defined, used: {sorted(used_mats)}")
 
