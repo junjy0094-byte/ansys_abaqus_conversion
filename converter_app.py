@@ -84,9 +84,14 @@ class ConverterApp:
         frm_run = tk.Frame(self.root, pady=5)
         frm_run.pack(fill="x", padx=10)
 
-        self.run_until = tk.StringVar(value="Step 4")
+        self.run_until = tk.StringVar(value="Step 4 (Full)")
         tk.Label(frm_run, text="Run up to:").pack(side="left", padx=(0, 5))
-        tk.OptionMenu(frm_run, self.run_until, "Step 1&2", "Step 3", "Step 4").pack(side="left", padx=(0, 15))
+        step_options = [
+            "Step 1&2 (Cleanup + CDWRITE)",
+            "Step 3 (CDB Text Clean)",
+            "Step 4 (Full)",
+        ]
+        tk.OptionMenu(frm_run, self.run_until, *step_options).pack(side="left", padx=(0, 15))
         self.btn_run = tk.Button(frm_run, text="Run", command=self._run, width=14, height=2)
         self.btn_run.pack(side="left")
 
@@ -129,12 +134,12 @@ class ConverterApp:
         until = self.run_until.get()
         try:
             self._step1_and_2()
-            if until == "Step 1&2":
+            if "Step 1&2" in until:
                 self._log("\n=== Stopped after Step 1&2 ===")
                 return
 
             cdb_path = self._step3_clean_cdb()
-            if until == "Step 3":
+            if "Step 3" in until:
                 self._log("\n=== Stopped after Step 3 ===")
                 return
 
@@ -261,17 +266,26 @@ class ConverterApp:
 
         self._log(f"  {len(all_mats)} material(s) defined, used: {sorted(used_mats)}")
 
-        deleted = 0
-        for mat_id in all_mats:
-            if mat_id not in used_mats:
-                try:
-                    mapdl.mpdele("ALL", mat_id)
-                    mapdl.tbdele("ALL", mat_id)
-                    deleted += 1
-                except Exception:
-                    pass
+        unused = [m for m in all_mats if m not in used_mats]
+        self._log(f"  {len(unused)} unused material(s) to delete...")
 
-        self._log(f"  Deleted {deleted} unused material(s).")
+        deleted = 0
+        for mat_id in unused:
+            ok = False
+            try:
+                mapdl.mpdele("ALL", mat_id)
+                ok = True
+            except Exception:
+                pass
+            try:
+                mapdl.tbdele("ALL", mat_id)
+                ok = True
+            except Exception:
+                pass
+            if ok:
+                deleted += 1
+
+        self._log(f"  Deleted {deleted} / {len(unused)} unused material(s).")
 
     def _step3_clean_cdb(self):
         """CDB 텍스트에서 불필요한 커맨드 블록 제거"""
