@@ -19,11 +19,10 @@ class ConverterApp:
         self.node_tol = tk.StringVar(value="1e-6")
 
         # MAPDL launch settings
-        self.mapdl_exec = tk.StringVar(value="")
-        self.mapdl_version = tk.StringVar(value="")
-        self.nproc = tk.StringVar(value="2")
+        self.mapdl_version = tk.StringVar(value="242")
+        self.nproc = tk.StringVar(value="4")
         self.ram = tk.StringVar(value="")
-        self.license_type = tk.StringVar(value="(auto)")
+        self.license_type = tk.StringVar(value="ansys")
         self.extra_switches = tk.StringVar(value="")
 
         self._build_ui()
@@ -55,26 +54,22 @@ class ConverterApp:
         frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
         frm_mapdl.pack(fill="x", padx=10, pady=5)
 
-        tk.Label(frm_mapdl, text="Exec Path (blank=auto):").grid(row=0, column=0, sticky="w")
-        tk.Entry(frm_mapdl, textvariable=self.mapdl_exec, width=38).grid(row=0, column=1, columnspan=4, sticky="w", padx=5)
-        tk.Button(frm_mapdl, text="Browse", command=self._browse_mapdl_exec).grid(row=0, column=5)
+        tk.Label(frm_mapdl, text="Version:").grid(row=0, column=0, sticky="w")
+        tk.Entry(frm_mapdl, textvariable=self.mapdl_version, width=10).grid(row=0, column=1, sticky="w", padx=5)
 
-        tk.Label(frm_mapdl, text="Version (blank=auto):").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        tk.Entry(frm_mapdl, textvariable=self.mapdl_version, width=10).grid(row=1, column=1, sticky="w", padx=5, pady=(5, 0))
+        tk.Label(frm_mapdl, text="Processors:").grid(row=0, column=2, sticky="w", padx=(15, 0))
+        tk.Entry(frm_mapdl, textvariable=self.nproc, width=6).grid(row=0, column=3, sticky="w", padx=5)
 
-        tk.Label(frm_mapdl, text="Processors:").grid(row=1, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
-        tk.Entry(frm_mapdl, textvariable=self.nproc, width=6).grid(row=1, column=3, sticky="w", padx=5, pady=(5, 0))
+        tk.Label(frm_mapdl, text="RAM MB (blank=auto):").grid(row=0, column=4, sticky="w", padx=(15, 0))
+        tk.Entry(frm_mapdl, textvariable=self.ram, width=8).grid(row=0, column=5, sticky="w", padx=5)
 
-        tk.Label(frm_mapdl, text="RAM MB (blank=auto):").grid(row=1, column=4, sticky="w", padx=(15, 0), pady=(5, 0))
-        tk.Entry(frm_mapdl, textvariable=self.ram, width=8).grid(row=1, column=5, sticky="w", padx=5, pady=(5, 0))
+        tk.Label(frm_mapdl, text="License Type:").grid(row=1, column=0, sticky="w", pady=(5, 0))
+        license_options = ["ansys", "mech", "struct", "dyna", "preppost", "enterprise"]
+        tk.OptionMenu(frm_mapdl, self.license_type, *license_options).grid(row=1, column=1, sticky="w", padx=5, pady=(5, 0))
 
-        tk.Label(frm_mapdl, text="License Type:").grid(row=2, column=0, sticky="w", pady=(5, 0))
-        license_options = ["(auto)", "ansys", "mech", "struct", "dyna", "preppost", "enterprise"]
-        tk.OptionMenu(frm_mapdl, self.license_type, *license_options).grid(row=2, column=1, sticky="w", padx=5, pady=(5, 0))
-
-        tk.Label(frm_mapdl, text="Extra Switches:").grid(row=2, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
+        tk.Label(frm_mapdl, text="Extra Switches:").grid(row=1, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
         tk.Entry(frm_mapdl, textvariable=self.extra_switches, width=30).grid(
-            row=2, column=3, columnspan=3, sticky="w", padx=5, pady=(5, 0)
+            row=1, column=3, columnspan=3, sticky="w", padx=5, pady=(5, 0)
         )
 
         # --- Step 3: Remove Blocks ---
@@ -89,8 +84,16 @@ class ConverterApp:
         frm_run = tk.Frame(self.root, pady=5)
         frm_run.pack(fill="x", padx=10)
 
-        self.btn_run = tk.Button(frm_run, text="Run Conversion", command=self._run, width=20, height=2)
-        self.btn_run.pack()
+        self.run_until = tk.StringVar(value="Step 4 (Full)")
+        tk.Label(frm_run, text="Run up to:").pack(side="left", padx=(0, 5))
+        step_options = [
+            "Step 1&2 (Cleanup + CDWRITE)",
+            "Step 3 (CDB Text Clean)",
+            "Step 4 (Full)",
+        ]
+        tk.OptionMenu(frm_run, self.run_until, *step_options).pack(side="left", padx=(0, 15))
+        self.btn_run = tk.Button(frm_run, text="Run", command=self._run, width=14, height=2)
+        self.btn_run.pack(side="left")
 
         # --- Log ---
         frm_log = tk.LabelFrame(self.root, text="Log", padx=10, pady=5)
@@ -112,14 +115,6 @@ class ConverterApp:
         if path:
             self.output_dir.set(path)
 
-    def _browse_mapdl_exec(self):
-        path = filedialog.askopenfilename(
-            title="Select MAPDL Executable",
-            filetypes=[("Executable", "*.exe"), ("All", "*.*")]
-        )
-        if path:
-            self.mapdl_exec.set(path)
-
     def _log(self, msg):
         self.log.config(state="normal")
         self.log.insert("end", msg + "\n")
@@ -136,9 +131,18 @@ class ConverterApp:
 
     # --- Pipeline ---
     def _run_pipeline(self):
+        until = self.run_until.get()
         try:
             self._step1_and_2()
+            if "Step 1&2" in until:
+                self._log("\n=== Stopped after Step 1&2 ===")
+                return
+
             cdb_path = self._step3_clean_cdb()
+            if "Step 3" in until:
+                self._log("\n=== Stopped after Step 3 ===")
+                return
+
             self._step4_convert(cdb_path)
             self._log("\n=== All steps completed ===")
         except Exception as e:
@@ -154,25 +158,21 @@ class ConverterApp:
 
         out_dir = self.output_dir.get()
 
-        exec_file = self.mapdl_exec.get().strip() or None
-
         version_str = self.mapdl_version.get().strip()
         if version_str:
             try:
                 version = int(version_str)
             except ValueError:
-                raise ValueError(f"MAPDL Version must be an integer (e.g. 192, 211, 222). Got: '{version_str}'")
+                raise ValueError(f"MAPDL Version must be an integer (e.g. 192, 211, 242). Got: '{version_str}'")
         else:
-            version = None
+            version = 242
 
-        nproc = int(self.nproc.get().strip()) if self.nproc.get().strip() else 2
+        nproc = int(self.nproc.get().strip()) if self.nproc.get().strip() else 4
         ram = int(self.ram.get().strip()) if self.ram.get().strip() else None
-        license_type = self.license_type.get().strip()
-        license_type = None if license_type == "(auto)" else license_type
+        license_type = self.license_type.get().strip() or "ansys"
         extra_switches = self.extra_switches.get().strip() or ""
 
         mapdl = launch_mapdl(
-            exec_file=exec_file,
             run_location=out_dir,
             override=True,
             version=version,
@@ -184,10 +184,18 @@ class ConverterApp:
         self._log(f"MAPDL launched (v{mapdl.version})")
 
         try:
-            # Resume .db
-            db = self.db_path.get()
-            mapdl.resume(db)
-            self._log(f"Resumed: {db}")
+            # Resume .db — MAPDL은 run_location 기준으로 파일을 찾으므로
+            # .db 파일을 run_location에 복사 후 파일명만 전달
+            db_src = self.db_path.get()
+            db_dst = os.path.join(out_dir, os.path.basename(db_src))
+            if os.path.normpath(db_src) != os.path.normpath(db_dst):
+                shutil.copy2(db_src, db_dst)
+                self._log(f"Copied .db to run_location: {db_dst}")
+            db_name = os.path.splitext(os.path.basename(db_src))[0]
+            mapdl.resume(db_name, "db")
+            self._log(f"Resumed: {db_name}")
+
+            mapdl.prep7()
 
             # --- Step 1: Cleanup ---
             self._log("Merging duplicate nodes...")
@@ -222,43 +230,62 @@ class ConverterApp:
             self._log("MAPDL closed.")
 
     def _remove_unused_mats(self, mapdl):
-        """미사용 물성 찾아서 삭제"""
-        # 사용 중인 MAT 번호 수집
-        used_mats = set()
+        """미사용 물성 찾아서 삭제 (*VGET 벌크 방식)"""
         mapdl.allsel("ALL")
-        elem_count = mapdl.get("NELEM", "ELEM", "", "COUNT")
+        elem_count = int(mapdl.get("NELEM", "ELEM", "", "COUNT"))
 
-        if elem_count > 0:
-            # ETABLE로 MAT 속성 추출 후 고유값 수집
-            try:
-                enum = mapdl.mesh.enum  # element numbers
-                for eid in enum:
-                    mat_id = mapdl.get("MVAL", "ELEM", eid, "ATTR", "MAT")
-                    used_mats.add(int(mat_id))
-            except Exception:
-                self._log("  Warning: Could not scan element MAT attrs, skipping unused MAT deletion.")
-                return
+        if elem_count == 0:
+            self._log("  No elements found, skipping.")
+            return
 
-        # 전체 MAT 번호 가져오기
+        # *VGET 은 배열 인덱스 = 요소 번호이므로 최대 요소 번호로 배열 크기 설정
+        max_enum = int(mapdl.get("MAXE", "ELEM", "", "NUM", "MAX"))
+        try:
+            mapdl.run(f"*DIM,_MATARR,ARRAY,{max_enum}")
+            mapdl.run("*VGET,_MATARR(1),ELEM,1,ATTR,MAT")
+            mat_array = mapdl.parameters["_MATARR"].flatten()
+            used_mats = set(mat_array[mat_array > 0].astype(int).tolist())
+        except Exception:
+            self._log("  Warning: Could not bulk-read element MAT attrs, skipping unused MAT deletion.")
+            return
+
+        self._log(f"  {len(used_mats)} material(s) in use (out of {elem_count} elements).")
+
+        # 전체 MAT 번호 수집 후 일괄 삭제 (순회 중 삭제 방지)
         mat_count = int(mapdl.get("NMAT", "MAT", "", "COUNT"))
         if mat_count == 0:
             return
 
-        deleted = 0
+        all_mats = []
         mat_id = 0
         for _ in range(mat_count):
             mat_id = int(mapdl.get("MID", "MAT", mat_id, "NXTH"))
             if mat_id == 0:
                 break
-            if mat_id not in used_mats:
-                try:
-                    mapdl.mpdele("ALL", mat_id)
-                    mapdl.tbdele("ALL", mat_id)
-                    deleted += 1
-                except Exception:
-                    pass
+            all_mats.append(mat_id)
 
-        self._log(f"  Deleted {deleted} unused material(s), {len(used_mats)} in use.")
+        self._log(f"  {len(all_mats)} material(s) defined, used: {sorted(used_mats)}")
+
+        unused = [m for m in all_mats if m not in used_mats]
+        self._log(f"  {len(unused)} unused material(s) to delete...")
+
+        deleted = 0
+        for mat_id in unused:
+            ok = False
+            try:
+                mapdl.mpdele("ALL", mat_id)
+                ok = True
+            except Exception:
+                pass
+            try:
+                mapdl.tbdele("ALL", mat_id)
+                ok = True
+            except Exception:
+                pass
+            if ok:
+                deleted += 1
+
+        self._log(f"  Deleted {deleted} / {len(unused)} unused material(s).")
 
     def _step3_clean_cdb(self):
         """CDB 텍스트에서 불필요한 커맨드 블록 제거"""
