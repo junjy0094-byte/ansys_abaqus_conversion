@@ -258,6 +258,9 @@ class ConverterApp:
 
         # ── 2) MAPDL 매크로로 순회+삭제를 한번에 처리 ──
         num_used = len(used_mats)
+        mat_max = int(mapdl.get("MATMAX", "MAT", "", "NUM", "MAX"))
+        self._log(f"  Max material number = {mat_max}")
+
         macro_path = os.path.join(mapdl.directory, "_del_unused_mats.mac")
         with open(macro_path, "w") as f:
             # 사용 중인 MAT ID → 배열
@@ -265,22 +268,25 @@ class ConverterApp:
             for i, mid in enumerate(used_mats, 1):
                 f.write(f"_USED({i})={mid}\n")
 
-            # Phase 1: NXTH 순회하면서 미사용 MAT ID 수집
-            f.write(f"*DIM,_DELARR,ARRAY,{mat_count}\n")
+            # Phase 1: NXTH 순회 (루프 범위 = 최대 물성 번호)
+            f.write(f"*DIM,_DELARR,ARRAY,{max(mat_count, 1)}\n")
             f.write("_MID=0\n")
             f.write("_DELN=0\n")
-            f.write(f"*DO,_I,1,{mat_count}\n")
+            f.write(f"*DO,_I,1,{mat_max}\n")
             f.write("  *GET,_MID,MAT,_MID,NXTH\n")
-            f.write("  *IF,_MID,EQ,0,EXIT\n")
-            f.write("  _SKIP=0\n")
-            f.write(f"  *DO,_J,1,{num_used}\n")
-            f.write("    *IF,_MID,EQ,_USED(_J),THEN\n")
-            f.write("      _SKIP=1\n")
+            f.write("  *IF,_MID,GT,0,THEN\n")
+            f.write("    _SKIP=0\n")
+            f.write(f"    *DO,_J,1,{num_used}\n")
+            f.write("      *IF,_MID,EQ,_USED(_J),THEN\n")
+            f.write("        _SKIP=1\n")
+            f.write("      *ENDIF\n")
+            f.write("    *ENDDO\n")
+            f.write("    *IF,_SKIP,EQ,0,THEN\n")
+            f.write("      _DELN=_DELN+1\n")
+            f.write("      _DELARR(_DELN)=_MID\n")
             f.write("    *ENDIF\n")
-            f.write("  *ENDDO\n")
-            f.write("  *IF,_SKIP,EQ,0,THEN\n")
-            f.write("    _DELN=_DELN+1\n")
-            f.write("    _DELARR(_DELN)=_MID\n")
+            f.write("  *ELSE\n")
+            f.write("    *EXIT\n")
             f.write("  *ENDIF\n")
             f.write("*ENDDO\n")
 
