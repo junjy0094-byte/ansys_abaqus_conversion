@@ -225,8 +225,8 @@ class ConverterApp:
         try:
             mapdl.run(f"*DIM,_MATARR,ARRAY,{elem_count}")
             mapdl.run("*VGET,_MATARR(1),ELEM,1,ATTR,MAT")
-            mat_array = mapdl.parameters["_MATARR"]
-            used_mats = set(int(m) for m in mat_array if m > 0)
+            mat_array = mapdl.parameters["_MATARR"].flatten()
+            used_mats = set(mat_array[mat_array > 0].astype(int).tolist())
         except Exception:
             self._log("  Warning: Could not bulk-read element MAT attrs, skipping unused MAT deletion.")
             return
