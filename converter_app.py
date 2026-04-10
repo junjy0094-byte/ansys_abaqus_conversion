@@ -84,8 +84,11 @@ class ConverterApp:
         frm_run = tk.Frame(self.root, pady=5)
         frm_run.pack(fill="x", padx=10)
 
-        self.btn_run = tk.Button(frm_run, text="Run Conversion", command=self._run, width=20, height=2)
-        self.btn_run.pack()
+        self.run_until = tk.StringVar(value="Step 4")
+        tk.Label(frm_run, text="Run up to:").pack(side="left", padx=(0, 5))
+        tk.OptionMenu(frm_run, self.run_until, "Step 1&2", "Step 3", "Step 4").pack(side="left", padx=(0, 15))
+        self.btn_run = tk.Button(frm_run, text="Run", command=self._run, width=14, height=2)
+        self.btn_run.pack(side="left")
 
         # --- Log ---
         frm_log = tk.LabelFrame(self.root, text="Log", padx=10, pady=5)
@@ -123,9 +126,18 @@ class ConverterApp:
 
     # --- Pipeline ---
     def _run_pipeline(self):
+        until = self.run_until.get()
         try:
             self._step1_and_2()
+            if until == "Step 1&2":
+                self._log("\n=== Stopped after Step 1&2 ===")
+                return
+
             cdb_path = self._step3_clean_cdb()
+            if until == "Step 3":
+                self._log("\n=== Stopped after Step 3 ===")
+                return
+
             self._step4_convert(cdb_path)
             self._log("\n=== All steps completed ===")
         except Exception as e:
