@@ -231,7 +231,7 @@ class ConverterApp:
             self._log("MAPDL closed.")
 
     def _remove_unused_mats(self, mapdl):
-        """미사용 물성 찾아서 삭제 (*VGET 벌크 방식)"""
+        """미사용 물성 찾아서 삭제"""
         mapdl.allsel("ALL")
         elem_count = int(mapdl.get("NELEM", "ELEM", "", "COUNT"))
 
@@ -239,7 +239,7 @@ class ConverterApp:
             self._log("  No elements found, skipping.")
             return
 
-        # *VGET 은 배열 인덱스 = 요소 번호이므로 최대 요소 번호로 배열 크기 설정
+        # ── 1) 사용 중인 MAT 번호 수집 (*VGET) ──
         max_enum = int(mapdl.get("MAXE", "ELEM", "", "NUM", "MAX"))
         try:
             mapdl.run(f"*DIM,_MATARR,ARRAY,{max_enum}")
@@ -252,43 +252,16 @@ class ConverterApp:
 
         self._log(f"  {len(used_mats)} material(s) in use (out of {elem_count} elements).")
 
-        # 전체 MAT 번호 수집 후 일괄 삭제 (순회 중 삭제 방지)
+        # ── 2) 정의된 전체 MAT 번호 수집 ──
         mat_count = int(mapdl.get("NMAT", "MAT", "", "COUNT"))
         if mat_count == 0:
             return
 
-        all_mats = []
-        mat_id = 0
-        for _ in range(mat_count):
-            try:
-                mapdl.run(f"*GET,_NXT_MAT,MAT,{mat_id},NXTH")
-                mat_id = int(float(mapdl.parameters["_NXT_MAT"]))
-            except Exception:
-                # fallback: mapdl.get() wrapper
-                try:
-                    mat_id = int(mapdl.get("_NXT_MAT", "MAT", mat_id, "NXTH"))
-                except Exception:
-                    break
-            if mat_id == 0:
-                break
-            all_mats.append(mat_id)
-
-        # fallback: *GET 순회 실패 시 MPLIST 파싱으로 수집
-        if not all_mats and mat_count > 0:
-            self._log(f"  *GET NXTH iteration returned 0 mats (expected {mat_count}), trying MPLIST fallback...")
-            try:
-                mp_output = mapdl.run("MPLIST,ALL,,,")
-                for line in mp_output.splitlines():
-                    m = re.match(r'\s*MATERIAL\s+NUMBER\s*=\s*(\d+)', line, re.IGNORECASE)
-                    if m:
-                        all_mats.append(int(m.group(1)))
-                # 중복 제거 및 정렬
-                all_mats = sorted(set(all_mats))
-            except Exception as e:
-                self._log(f"  MPLIST fallback also failed: {e}")
+        all_mats = self._collect_all_mat_ids(mapdl, mat_count)
 
         self._log(f"  {len(all_mats)} material(s) defined, used: {sorted(used_mats)}")
 
+        # ── 3) 미사용 MAT 삭제 ──
         unused = [m for m in all_mats if m not in used_mats]
         self._log(f"  {len(unused)} unused material(s) to delete...")
 
@@ -309,6 +282,92 @@ class ConverterApp:
                 deleted += 1
 
         self._log(f"  Deleted {deleted} / {len(unused)} unused material(s).")
+
+    def _collect_all_mat_ids(self, mapdl, mat_count):
+        """정의된 전체 MAT ID 목록 수집 (여러 방법 시도)"""
+
+        # ── 방법 1: MAPDL 내부 *DO 루프 → 배열로 한번에 수집 ──
+        try:
+            mapdl.run(f"*DIM,_MATIDS,ARRAY,{mat_count}")
+            with mapdl.non_interactive:
+                mapdl.run("_MID=0")
+                mapdl.run("_IDX=0")
+                mapdl.run(f"*DO,_I,1,{mat_count}")
+                mapdl.run("*GET,_MID,MAT,_MID,NXTH")
+                mapdl.run("*IF,_MID,EQ,0,EXIT")
+                mapdl.run("_IDX=_IDX+1")
+                mapdl.run("_MATIDS(_IDX)=_MID")
+                mapdl.run("*ENDDO")
+            ids = mapdl.parameters["_MATIDS"].flatten()
+            result = sorted(int(x) for x in ids if x > 0)
+            if result:
+                self._log(f"  [mat collect] *DO loop: found {len(result)} mat(s)")
+                return result
+        except Exception as e:
+            self._log(f"  [mat collect] *DO loop failed: {e}")
+
+        # ── 방법 2: 매크로 파일로 *DO 루프 실행 ──
+        try:
+            macro = os.path.join(mapdl.directory, "_getmats.mac")
+            with open(macro, "w") as f:
+                f.write(f"*DIM,_MATIDS,ARRAY,{mat_count}\n")
+                f.write("_MID=0\n")
+                f.write("_IDX=0\n")
+                f.write(f"*DO,_I,1,{mat_count}\n")
+                f.write("*GET,_MID,MAT,_MID,NXTH\n")
+                f.write("*IF,_MID,EQ,0,EXIT\n")
+                f.write("_IDX=_IDX+1\n")
+                f.write("_MATIDS(_IDX)=_MID\n")
+                f.write("*ENDDO\n")
+            mapdl.input(macro)
+            ids = mapdl.parameters["_MATIDS"].flatten()
+            result = sorted(int(x) for x in ids if x > 0)
+            if result:
+                self._log(f"  [mat collect] macro file: found {len(result)} mat(s)")
+                return result
+        except Exception as e:
+            self._log(f"  [mat collect] macro file failed: {e}")
+
+        # ── 방법 3: *GET 출력 텍스트 직접 파싱 (Python 루프) ──
+        try:
+            result = []
+            mid = 0
+            for _ in range(mat_count):
+                output = mapdl.run(f"*GET,_NM,MAT,{mid},NXTH")
+                parsed = re.search(r'=\s*([\d.Ee+-]+)', output)
+                if parsed:
+                    mid = int(float(parsed.group(1)))
+                else:
+                    try:
+                        mid = int(float(mapdl.parameters["_NM"]))
+                    except Exception:
+                        break
+                if mid == 0:
+                    break
+                result.append(mid)
+            if result:
+                self._log(f"  [mat collect] *GET parse: found {len(result)} mat(s)")
+                return result
+        except Exception as e:
+            self._log(f"  [mat collect] *GET parse failed: {e}")
+
+        # ── 방법 4: MPLIST 출력 파싱 ──
+        try:
+            result = []
+            mp_output = mapdl.run("MPLIST,ALL,,,")
+            for line in mp_output.splitlines():
+                m = re.match(r'\s*MATERIAL\s+NUMBER\s*=?\s*(\d+)', line, re.IGNORECASE)
+                if m:
+                    result.append(int(m.group(1)))
+            result = sorted(set(result))
+            if result:
+                self._log(f"  [mat collect] MPLIST parse: found {len(result)} mat(s)")
+                return result
+        except Exception as e:
+            self._log(f"  [mat collect] MPLIST parse failed: {e}")
+
+        self._log("  [mat collect] WARNING: all methods failed, returning empty list")
+        return []
 
     def _step3_clean_cdb(self):
         """CDB 텍스트에서 불필요한 커맨드 블록 제거"""
