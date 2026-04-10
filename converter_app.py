@@ -19,7 +19,6 @@ class ConverterApp:
         self.node_tol = tk.StringVar(value="1e-6")
 
         # MAPDL launch settings
-        self.mapdl_exec = tk.StringVar(value="")
         self.mapdl_version = tk.StringVar(value="")
         self.nproc = tk.StringVar(value="2")
         self.ram = tk.StringVar(value="")
@@ -55,26 +54,22 @@ class ConverterApp:
         frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
         frm_mapdl.pack(fill="x", padx=10, pady=5)
 
-        tk.Label(frm_mapdl, text="Exec Path (blank=auto):").grid(row=0, column=0, sticky="w")
-        tk.Entry(frm_mapdl, textvariable=self.mapdl_exec, width=38).grid(row=0, column=1, columnspan=4, sticky="w", padx=5)
-        tk.Button(frm_mapdl, text="Browse", command=self._browse_mapdl_exec).grid(row=0, column=5)
+        tk.Label(frm_mapdl, text="Version (blank=auto):").grid(row=0, column=0, sticky="w")
+        tk.Entry(frm_mapdl, textvariable=self.mapdl_version, width=10).grid(row=0, column=1, sticky="w", padx=5)
 
-        tk.Label(frm_mapdl, text="Version (blank=auto):").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        tk.Entry(frm_mapdl, textvariable=self.mapdl_version, width=10).grid(row=1, column=1, sticky="w", padx=5, pady=(5, 0))
+        tk.Label(frm_mapdl, text="Processors:").grid(row=0, column=2, sticky="w", padx=(15, 0))
+        tk.Entry(frm_mapdl, textvariable=self.nproc, width=6).grid(row=0, column=3, sticky="w", padx=5)
 
-        tk.Label(frm_mapdl, text="Processors:").grid(row=1, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
-        tk.Entry(frm_mapdl, textvariable=self.nproc, width=6).grid(row=1, column=3, sticky="w", padx=5, pady=(5, 0))
+        tk.Label(frm_mapdl, text="RAM MB (blank=auto):").grid(row=0, column=4, sticky="w", padx=(15, 0))
+        tk.Entry(frm_mapdl, textvariable=self.ram, width=8).grid(row=0, column=5, sticky="w", padx=5)
 
-        tk.Label(frm_mapdl, text="RAM MB (blank=auto):").grid(row=1, column=4, sticky="w", padx=(15, 0), pady=(5, 0))
-        tk.Entry(frm_mapdl, textvariable=self.ram, width=8).grid(row=1, column=5, sticky="w", padx=5, pady=(5, 0))
-
-        tk.Label(frm_mapdl, text="License Type:").grid(row=2, column=0, sticky="w", pady=(5, 0))
+        tk.Label(frm_mapdl, text="License Type:").grid(row=1, column=0, sticky="w", pady=(5, 0))
         license_options = ["(auto)", "ansys", "mech", "struct", "dyna", "preppost", "enterprise"]
-        tk.OptionMenu(frm_mapdl, self.license_type, *license_options).grid(row=2, column=1, sticky="w", padx=5, pady=(5, 0))
+        tk.OptionMenu(frm_mapdl, self.license_type, *license_options).grid(row=1, column=1, sticky="w", padx=5, pady=(5, 0))
 
-        tk.Label(frm_mapdl, text="Extra Switches:").grid(row=2, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
+        tk.Label(frm_mapdl, text="Extra Switches:").grid(row=1, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
         tk.Entry(frm_mapdl, textvariable=self.extra_switches, width=30).grid(
-            row=2, column=3, columnspan=3, sticky="w", padx=5, pady=(5, 0)
+            row=1, column=3, columnspan=3, sticky="w", padx=5, pady=(5, 0)
         )
 
         # --- Step 3: Remove Blocks ---
@@ -112,14 +107,6 @@ class ConverterApp:
         if path:
             self.output_dir.set(path)
 
-    def _browse_mapdl_exec(self):
-        path = filedialog.askopenfilename(
-            title="Select MAPDL Executable",
-            filetypes=[("Executable", "*.exe"), ("All", "*.*")]
-        )
-        if path:
-            self.mapdl_exec.set(path)
-
     def _log(self, msg):
         self.log.config(state="normal")
         self.log.insert("end", msg + "\n")
@@ -154,8 +141,6 @@ class ConverterApp:
 
         out_dir = self.output_dir.get()
 
-        exec_file = self.mapdl_exec.get().strip() or None
-
         version_str = self.mapdl_version.get().strip()
         if version_str:
             try:
@@ -172,7 +157,6 @@ class ConverterApp:
         extra_switches = self.extra_switches.get().strip() or ""
 
         mapdl = launch_mapdl(
-            exec_file=exec_file,
             run_location=out_dir,
             override=True,
             version=version,
@@ -184,10 +168,16 @@ class ConverterApp:
         self._log(f"MAPDL launched (v{mapdl.version})")
 
         try:
-            # Resume .db
-            db = self.db_path.get()
-            mapdl.resume(db)
-            self._log(f"Resumed: {db}")
+            # Resume .db — MAPDL은 run_location 기준으로 파일을 찾으므로
+            # .db 파일을 run_location에 복사 후 파일명만 전달
+            db_src = self.db_path.get()
+            db_dst = os.path.join(out_dir, os.path.basename(db_src))
+            if os.path.normpath(db_src) != os.path.normpath(db_dst):
+                shutil.copy2(db_src, db_dst)
+                self._log(f"Copied .db to run_location: {db_dst}")
+            db_name = os.path.splitext(os.path.basename(db_src))[0]
+            mapdl.resume(db_name, "db")
+            self._log(f"Resumed: {db_name}")
 
             # --- Step 1: Cleanup ---
             self._log("Merging duplicate nodes...")
