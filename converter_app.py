@@ -129,14 +129,20 @@ class ConverterApp:
             self._log("Removing unused material properties...")
             self._remove_unused_mats(mapdl)
 
-            # 넘버링 압축
+            # 넘버링 압축 (MAT 제외 - 물성 번호는 압축하지 않음)
             self._log("Compressing numbering...")
-            for entity in ["NODE", "ELEM", "MAT", "REAL", "TYPE"]:
+            for entity in ["NODE", "ELEM", "REAL", "TYPE"]:
                 mapdl.numcmp(entity)
 
             mapdl.allsel("ALL")
 
-            # --- Step 2: CDWRITE ---
+            # --- Step 2a: 새 DB 저장 (원본 오염 방지) ---
+            db_name = "clean_model"
+            self._log(f"Saving cleaned model as {db_name}.db ...")
+            mapdl.save(db_name, "db")
+            self._log(f"{db_name}.db saved.")
+
+            # --- Step 2b: CDWRITE ---
             cdb_name = "clean_model"
             self._log(f"Writing {cdb_name}.cdb ...")
             mapdl.cdwrite("DB", cdb_name, "cdb")
