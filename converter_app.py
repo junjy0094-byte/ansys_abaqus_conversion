@@ -179,6 +179,8 @@ class ConverterApp:
             mapdl.resume(db_name, "db")
             self._log(f"Resumed: {db_name}")
 
+            mapdl.prep7()
+
             # --- Step 1: Cleanup ---
             self._log("Merging duplicate nodes...")
             tol = float(self.node_tol.get())
