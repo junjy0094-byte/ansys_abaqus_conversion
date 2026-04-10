@@ -19,10 +19,10 @@ class ConverterApp:
         self.node_tol = tk.StringVar(value="1e-6")
 
         # MAPDL launch settings
-        self.mapdl_version = tk.StringVar(value="")
-        self.nproc = tk.StringVar(value="2")
+        self.mapdl_version = tk.StringVar(value="242")
+        self.nproc = tk.StringVar(value="4")
         self.ram = tk.StringVar(value="")
-        self.license_type = tk.StringVar(value="(auto)")
+        self.license_type = tk.StringVar(value="ansys")
         self.extra_switches = tk.StringVar(value="")
 
         self._build_ui()
@@ -54,7 +54,7 @@ class ConverterApp:
         frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
         frm_mapdl.pack(fill="x", padx=10, pady=5)
 
-        tk.Label(frm_mapdl, text="Version (blank=auto):").grid(row=0, column=0, sticky="w")
+        tk.Label(frm_mapdl, text="Version:").grid(row=0, column=0, sticky="w")
         tk.Entry(frm_mapdl, textvariable=self.mapdl_version, width=10).grid(row=0, column=1, sticky="w", padx=5)
 
         tk.Label(frm_mapdl, text="Processors:").grid(row=0, column=2, sticky="w", padx=(15, 0))
@@ -64,7 +64,7 @@ class ConverterApp:
         tk.Entry(frm_mapdl, textvariable=self.ram, width=8).grid(row=0, column=5, sticky="w", padx=5)
 
         tk.Label(frm_mapdl, text="License Type:").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        license_options = ["(auto)", "ansys", "mech", "struct", "dyna", "preppost", "enterprise"]
+        license_options = ["ansys", "mech", "struct", "dyna", "preppost", "enterprise"]
         tk.OptionMenu(frm_mapdl, self.license_type, *license_options).grid(row=1, column=1, sticky="w", padx=5, pady=(5, 0))
 
         tk.Label(frm_mapdl, text="Extra Switches:").grid(row=1, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
@@ -146,14 +146,13 @@ class ConverterApp:
             try:
                 version = int(version_str)
             except ValueError:
-                raise ValueError(f"MAPDL Version must be an integer (e.g. 192, 211, 222). Got: '{version_str}'")
+                raise ValueError(f"MAPDL Version must be an integer (e.g. 192, 211, 242). Got: '{version_str}'")
         else:
-            version = None
+            version = 242
 
-        nproc = int(self.nproc.get().strip()) if self.nproc.get().strip() else 2
+        nproc = int(self.nproc.get().strip()) if self.nproc.get().strip() else 4
         ram = int(self.ram.get().strip()) if self.ram.get().strip() else None
-        license_type = self.license_type.get().strip()
-        license_type = None if license_type == "(auto)" else license_type
+        license_type = self.license_type.get().strip() or "ansys"
         extra_switches = self.extra_switches.get().strip() or ""
 
         mapdl = launch_mapdl(
@@ -214,22 +213,25 @@ class ConverterApp:
             self._log("MAPDL closed.")
 
     def _remove_unused_mats(self, mapdl):
-        """미사용 물성 찾아서 삭제"""
-        # 사용 중인 MAT 번호 수집
-        used_mats = set()
+        """미사용 물성 찾아서 삭제 (*VGET 벌크 방식)"""
         mapdl.allsel("ALL")
-        elem_count = mapdl.get("NELEM", "ELEM", "", "COUNT")
+        elem_count = int(mapdl.get("NELEM", "ELEM", "", "COUNT"))
 
-        if elem_count > 0:
-            # ETABLE로 MAT 속성 추출 후 고유값 수집
-            try:
-                enum = mapdl.mesh.enum  # element numbers
-                for eid in enum:
-                    mat_id = mapdl.get("MVAL", "ELEM", eid, "ATTR", "MAT")
-                    used_mats.add(int(mat_id))
-            except Exception:
-                self._log("  Warning: Could not scan element MAT attrs, skipping unused MAT deletion.")
-                return
+        if elem_count == 0:
+            self._log("  No elements found, skipping.")
+            return
+
+        # *VGET 으로 전체 요소의 MAT 속성을 한 번에 가져오기
+        try:
+            mapdl.run(f"*DIM,_MATARR,ARRAY,{elem_count}")
+            mapdl.run("*VGET,_MATARR(1),ELEM,1,ATTR,MAT")
+            mat_array = mapdl.parameters["_MATARR"]
+            used_mats = set(int(m) for m in mat_array if m > 0)
+        except Exception:
+            self._log("  Warning: Could not bulk-read element MAT attrs, skipping unused MAT deletion.")
+            return
+
+        self._log(f"  {len(used_mats)} material(s) in use by elements.")
 
         # 전체 MAT 번호 가져오기
         mat_count = int(mapdl.get("NMAT", "MAT", "", "COUNT"))
@@ -250,7 +252,7 @@ class ConverterApp:
                 except Exception:
                     pass
 
-        self._log(f"  Deleted {deleted} unused material(s), {len(used_mats)} in use.")
+        self._log(f"  Deleted {deleted} unused material(s).")
 
     def _step3_clean_cdb(self):
         """CDB 텍스트에서 불필요한 커맨드 블록 제거"""
