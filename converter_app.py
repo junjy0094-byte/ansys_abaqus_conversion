@@ -233,9 +233,10 @@ class ConverterApp:
             self._log("  No elements found, skipping.")
             return
 
-        # *VGET 으로 전체 요소의 MAT 속성을 한 번에 가져오기
+        # *VGET 은 배열 인덱스 = 요소 번호이므로 최대 요소 번호로 배열 크기 설정
+        max_enum = int(mapdl.get("MAXE", "ELEM", "", "NUM", "MAX"))
         try:
-            mapdl.run(f"*DIM,_MATARR,ARRAY,{elem_count}")
+            mapdl.run(f"*DIM,_MATARR,ARRAY,{max_enum}")
             mapdl.run("*VGET,_MATARR(1),ELEM,1,ATTR,MAT")
             mat_array = mapdl.parameters["_MATARR"].flatten()
             used_mats = set(mat_array[mat_array > 0].astype(int).tolist())
@@ -243,19 +244,25 @@ class ConverterApp:
             self._log("  Warning: Could not bulk-read element MAT attrs, skipping unused MAT deletion.")
             return
 
-        self._log(f"  {len(used_mats)} material(s) in use by elements.")
+        self._log(f"  {len(used_mats)} material(s) in use (out of {elem_count} elements).")
 
-        # 전체 MAT 번호 가져오기
+        # 전체 MAT 번호 수집 후 일괄 삭제 (순회 중 삭제 방지)
         mat_count = int(mapdl.get("NMAT", "MAT", "", "COUNT"))
         if mat_count == 0:
             return
 
-        deleted = 0
+        all_mats = []
         mat_id = 0
         for _ in range(mat_count):
             mat_id = int(mapdl.get("MID", "MAT", mat_id, "NXTH"))
             if mat_id == 0:
                 break
+            all_mats.append(mat_id)
+
+        self._log(f"  {len(all_mats)} material(s) defined, used: {sorted(used_mats)}")
+
+        deleted = 0
+        for mat_id in all_mats:
             if mat_id not in used_mats:
                 try:
                     mapdl.mpdele("ALL", mat_id)
