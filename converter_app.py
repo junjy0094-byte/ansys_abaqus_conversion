@@ -335,6 +335,19 @@ class ConverterApp:
             mapdl.cdwrite("DB", cdb_name, "cdb", fmat=fmat)
             self._log("CDWRITE complete.")
 
+            # When BLOCKED, the file contains ETBLOCK which `abaqus
+            # fromansys` and older HyperMesh versions do not recognise.
+            # Rewrite only the ETBLOCK section as classic ET/KEYOPT
+            # commands; NBLOCK/EBLOCK stay intact so fromansys still
+            # sees node/element data.
+            if not use_unblocked:
+                cdb_path = os.path.join(out_dir, f"{cdb_name}.cdb")
+                expanded = self._expand_etblock(cdb_path)
+                if expanded:
+                    self._log(
+                        f"  Expanded ETBLOCK -> {expanded} ET/KEYOPT card(s)."
+                    )
+
         finally:
             mapdl.exit()
             self._log("MAPDL closed.")
@@ -724,6 +737,85 @@ class ConverterApp:
 
         self._log(f"Removed {removed_count} block(s). Saved: {dst}")
         return dst
+
+    def _expand_etblock(self, cdb_path):
+        """Replace every ETBLOCK block in a .cdb with ET/KEYOPT cards.
+
+        The ETBLOCK command was introduced in Ansys 2023 R1 as a compact
+        replacement for sequences of ET + KEYOPT commands. Tools that
+        still parse the classic CDB dialect (notably `abaqus fromansys`
+        and older HyperMesh versions) reject it with messages like
+        "unrecognized keyword = ETBLOCK" or "found 0 entries in ET data".
+
+        The block format emitted by MAPDL is:
+
+            ETBLOCK,<numhead>,<maxkyo>
+            (i9,19a9)
+                    1      186        0        0 ...
+                    2      174        0        0 ...
+                   -1
+
+        Each data row is: itype, ename, kop1, kop2, ..., kop18 (trailing
+        zero fields may be truncated). We rewrite the block as:
+
+            ET,<itype>,<ename>
+            KEYOPT,<itype>,<n>,<value>     (only for non-zero keyopts)
+
+        The file is rewritten in place. Returns the number of expanded
+        element-type rows, or 0 if no ETBLOCK section was found.
+        """
+        try:
+            with open(cdb_path, "r") as f:
+                lines = f.readlines()
+        except (FileNotFoundError, OSError):
+            return 0
+
+        out_lines = []
+        expanded = 0
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            if line.lstrip().upper().startswith("ETBLOCK"):
+                # Skip the ETBLOCK header and its (i9,19a9)-style format line.
+                i += 1
+                if i < n and lines[i].lstrip().startswith("("):
+                    i += 1
+                # Consume data rows until a lone "-1" sentinel.
+                while i < n:
+                    row = lines[i].strip()
+                    if not row:
+                        i += 1
+                        continue
+                    if row.startswith("-1"):
+                        i += 1
+                        break
+                    parts = row.split()
+                    try:
+                        itype = int(parts[0])
+                        ename = parts[1]
+                        keyopts = [int(p) for p in parts[2:]]
+                    except (ValueError, IndexError):
+                        # Unrecognised row — keep it verbatim to be safe.
+                        out_lines.append(lines[i])
+                        i += 1
+                        continue
+                    out_lines.append(f"ET,{itype},{ename}\n")
+                    for slot, kop in enumerate(keyopts, start=1):
+                        if kop != 0:
+                            out_lines.append(
+                                f"KEYOPT,{itype},{slot},{kop}\n"
+                            )
+                    expanded += 1
+                    i += 1
+                continue
+            out_lines.append(line)
+            i += 1
+
+        if expanded:
+            with open(cdb_path, "w") as f:
+                f.writelines(out_lines)
+        return expanded
 
     def _step3_5_extra(self, cdb_path):
         """Placeholder stage between Step 3 and Step 4.
