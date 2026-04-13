@@ -440,14 +440,6 @@ class ConverterApp:
         n_arrays = self._delete_array_params(mapdl)
         self._log(f"  Deleted {n_arrays} array/table parameter(s).")
 
-        # ── 6) 남은 사용자 정의 파라미터 일괄 삭제 (*DEL,ALL) ──
-        # KABS=0 이므로 _XXX 형태의 PyMAPDL 내부 파라미터는 보존된다.
-        try:
-            mapdl.run("*DEL,ALL")
-            self._log("  Issued *DEL,ALL (cleared user parameters).")
-        except Exception as e:
-            self._log(f"  Warning: *DEL,ALL failed: {e}")
-
     def _parse_celist(self, mapdl):
         """Dump CELIST to a text file and parse it.
 
