@@ -354,7 +354,6 @@ class ConverterApp:
                         f"classic format (abaqus fromansys compatible)."
                     )
 
-            # Step 4 텍스트 INP 생성을 위해 nset/material 메타데이터 저장
             self._export_step1_metadata(mapdl, out_dir)
 
         finally:
@@ -483,6 +482,16 @@ class ConverterApp:
             # slave 우선 - 양쪽에 동시에 들어간 노드는 master에서 제외
             master_nodes -= slave_nodes
 
+        # CELIST 파싱 실패 시 기존 컴포넌트명에서 fallback
+        if not slave_nodes and not master_nodes:
+            existing = [n.upper() for n in self._list_all_components(mapdl)]
+            if "SLAVE_TIE" in existing:
+                slave_nodes.update(self._get_component_node_ids(mapdl, ["SLAVE_TIE"]))
+            if "MASTER_TIE" in existing:
+                master_nodes.update(self._get_component_node_ids(mapdl, ["MASTER_TIE"]))
+            if slave_nodes or master_nodes:
+                self._log("  Fallback: reused existing MASTER_TIE/SLAVE_TIE components.")
+
         created_cms = set()
 
         # ── 2) 노드 리스트로부터 CM 생성 (매크로로 NSEL,A 일괄 처리) ──
@@ -568,7 +577,8 @@ class ConverterApp:
         # MAPDL CELIST 노드 라인 패턴 (두 가지 가능한 포맷 모두 수용)
         node_patterns = [
             re.compile(r"NODE\s*=\s*(\d+)", re.IGNORECASE),
-            re.compile(r"^\s*(\d+)\s+[A-Za-z]{1,4}\s+[-+0-9.Ee]+"),
+            # e.g. "  12345 UX 1.0000E+00"
+            re.compile(r"^\s*(\d+)\s+(UX|UY|UZ|ROTX|ROTY|ROTZ|TEMP)\s+[-+0-9.Ee]+", re.IGNORECASE),
         ]
         header_pat = re.compile(r"CONSTRAINT\s+EQUATION", re.IGNORECASE)
 
