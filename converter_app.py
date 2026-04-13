@@ -1226,19 +1226,94 @@ class ConverterApp:
         return nsets
 
     def _read_materials_from_mplist_txt(self, mplist_path):
-        """Return {mat_id: {'name': 'matxxx', 'raw_lines': [...]}} from MPLIST txt."""
+        """Parse MPLIST-like text tables with tabs/newlines/blank temps.
+
+        Returns:
+            {
+              mat_id: {
+                'name': 'mat{id}',
+                'props': {
+                  'ex': {'ref_temp': 183.0|None, 'rows': [(temp|None, value), ...]},
+                  ...
+                },
+                'raw_lines': [...]
+              }
+            }
+        """
         mats = {}
         cur_id = None
+        cur_prop = None
+        num_re = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?")
+
+        def _to_float(tok):
+            try:
+                return float(tok)
+            except ValueError:
+                return None
+
         with open(mplist_path, "r") as f:
             for raw in f:
-                m = re.search(r"MATERIAL\s+NUMBER\s*=?\s*(\d+)", raw, re.IGNORECASE)
+                line = raw.rstrip("\n")
+                s = line.strip()
+                if not s:
+                    continue
+
+                m = re.search(r"MATERIAL\s+NUMBER\s*=?\s*(\d+)", s, re.IGNORECASE)
                 if m:
                     cur_id = int(m.group(1))
-                    mats[cur_id] = {"name": f"mat{cur_id}", "raw_lines": []}
+                    mats[cur_id] = {"name": f"mat{cur_id}", "raw_lines": [], "props": {}}
+                    cur_prop = None
                     continue
-                if cur_id is not None:
-                    mats[cur_id]["raw_lines"].append(raw.rstrip("\n"))
+                if cur_id is None:
+                    continue
+                mats[cur_id]["raw_lines"].append(line)
+
+                # ex) "temp ex", "temp alpx reference temp.=183"
+                if re.match(r"^\s*temp\b", s, re.IGNORECASE):
+                    parts = s.split()
+                    if len(parts) >= 2:
+                        cur_prop = parts[1].strip().lower()
+                        ref_match = re.search(r"reference\s*temp\.?\s*=\s*(" + num_re.pattern + ")", s, re.IGNORECASE)
+                        ref_temp = float(ref_match.group(1)) if ref_match else None
+                        mats[cur_id]["props"].setdefault(cur_prop, {"ref_temp": ref_temp, "rows": []})
+                        if ref_temp is not None:
+                            mats[cur_id]["props"][cur_prop]["ref_temp"] = ref_temp
+                    continue
+
+                if not cur_prop:
+                    continue
+                tokens = s.split()
+                # 빈 temperature(상수값) 케이스: 값 1개만 있는 행
+                if len(tokens) == 1:
+                    val = _to_float(tokens[0])
+                    if val is not None:
+                        mats[cur_id]["props"][cur_prop]["rows"].append((None, val))
+                    continue
+                # 일반 케이스: temp + value
+                t = _to_float(tokens[0])
+                v = _to_float(tokens[1])
+                if t is not None and v is not None:
+                    mats[cur_id]["props"][cur_prop]["rows"].append((t, v))
         return mats
+
+    def _fmt_num(self, v):
+        if isinstance(v, (int, float)):
+            return f"{v:.9g}"
+        return str(v)
+
+    def _prop_rows(self, props, key):
+        entry = props.get(key, {})
+        return entry.get("rows", [])
+
+    def _value_for_temp(self, rows, temp):
+        exact = [v for t, v in rows if t is not None and abs(t - temp) <= 1e-12]
+        if exact:
+            return exact[-1]
+        consts = [v for t, v in rows if t is None]
+        return consts[-1] if consts else None
+
+    def _temps_from_rows(self, rows):
+        return sorted({t for t, _ in rows if t is not None})
 
     def _write_template_inp(self, inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info):
         with open(inp_path, "w") as f:
@@ -1293,26 +1368,86 @@ class ConverterApp:
             for mid in mat_ids:
                 mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
                 f.write(f"*MATERIAL, NAME={mat}\n")
-                raw_lines = mat_info.get(mid, {}).get("raw_lines", [])
-                for ln in raw_lines[:20]:
-                    if ln.strip():
-                        f.write(f"** MPLIST: {ln}\n")
-                f.write("** TODO: choose one of below blocks\n")
-                f.write("** 1) Isotropic at room temperature\n")
-                f.write("*ELASTIC\n")
-                f.write("210000., 0.30\n")
-                f.write("*EXPANSION\n")
-                f.write("1.2e-5\n")
-                f.write("** 2) Temperature-dependent isotropic\n")
-                f.write("** *ELASTIC\n")
-                f.write("** E, nu, T1\n")
-                f.write("** *EXPANSION\n")
-                f.write("** CTE, T1\n")
+                props = mat_info.get(mid, {}).get("props", {})
                 if mat.lower().startswith("mat999"):
+                    # Orthotropic
                     f.write("*ELASTIC, TYPE=ENGINEERING CONSTANTS\n")
-                    f.write("** Ex, Ey, Ez, vxy, vyz, vxz, Gxy, Gyz, Gxz, T\n")
+                    keys_main = ["ex", "ey", "ez", "nuxy", "nuyz", "nuxz", "gxy", "gyz", "gxz"]
+                    rows_all = []
+                    for k in keys_main:
+                        rows_all.extend(self._prop_rows(props, k))
+                    temps = self._temps_from_rows(rows_all)
+                    if temps:
+                        for t in temps:
+                            vals = [self._value_for_temp(self._prop_rows(props, k), t) for k in keys_main]
+                            if any(v is None for v in vals):
+                                continue
+                            f.write(", ".join(self._fmt_num(v) for v in vals) + f", {self._fmt_num(t)}\n")
+                    else:
+                        vals = [self._value_for_temp(self._prop_rows(props, k), 0.0) for k in keys_main]
+                        if any(v is None for v in vals):
+                            f.write("** TODO: fill engineering constants\n")
+                        else:
+                            f.write(", ".join(self._fmt_num(v) for v in vals) + "\n")
+
                     f.write("*EXPANSION, TYPE=ORTHOTROPIC\n")
-                    f.write("** ctex, ctey, ctez\n")
+                    ctex_rows = self._prop_rows(props, "alpx")
+                    ctey_rows = self._prop_rows(props, "alpy")
+                    ctez_rows = self._prop_rows(props, "alpz")
+                    cte_temps = self._temps_from_rows(ctex_rows + ctey_rows + ctez_rows)
+                    if cte_temps:
+                        for t in cte_temps:
+                            vx = self._value_for_temp(ctex_rows, t)
+                            vy = self._value_for_temp(ctey_rows, t)
+                            vz = self._value_for_temp(ctez_rows, t)
+                            if vx is None or vy is None or vz is None:
+                                continue
+                            f.write(f"{self._fmt_num(vx)}, {self._fmt_num(vy)}, {self._fmt_num(vz)}, {self._fmt_num(t)}\n")
+                    else:
+                        vx = self._value_for_temp(ctex_rows, 0.0)
+                        vy = self._value_for_temp(ctey_rows, 0.0)
+                        vz = self._value_for_temp(ctez_rows, 0.0)
+                        if vx is None or vy is None or vz is None:
+                            f.write("** TODO: fill orthotropic CTE\n")
+                        else:
+                            f.write(f"{self._fmt_num(vx)}, {self._fmt_num(vy)}, {self._fmt_num(vz)}\n")
+                else:
+                    # Isotropic
+                    ex_rows = self._prop_rows(props, "ex")
+                    nu_rows = self._prop_rows(props, "nuxy")
+                    alpha_rows = self._prop_rows(props, "alpx")
+
+                    elastic_temps = self._temps_from_rows(ex_rows + nu_rows)
+                    if elastic_temps:
+                        f.write("*ELASTIC\n")
+                        for t in elastic_temps:
+                            ex = self._value_for_temp(ex_rows, t)
+                            nu = self._value_for_temp(nu_rows, t)
+                            if ex is None or nu is None:
+                                continue
+                            f.write(f"{self._fmt_num(ex)}, {self._fmt_num(nu)}, {self._fmt_num(t)}\n")
+                    else:
+                        ex = self._value_for_temp(ex_rows, 0.0)
+                        nu = self._value_for_temp(nu_rows, 0.0)
+                        f.write("*ELASTIC\n")
+                        if ex is None or nu is None:
+                            f.write("** TODO: fill E, nu\n")
+                        else:
+                            f.write(f"{self._fmt_num(ex)}, {self._fmt_num(nu)}\n")
+
+                    exp_temps = self._temps_from_rows(alpha_rows)
+                    f.write("*EXPANSION\n")
+                    if exp_temps:
+                        for t in exp_temps:
+                            a = self._value_for_temp(alpha_rows, t)
+                            if a is not None:
+                                f.write(f"{self._fmt_num(a)}, {self._fmt_num(t)}\n")
+                    else:
+                        a = self._value_for_temp(alpha_rows, 0.0)
+                        if a is None:
+                            f.write("** TODO: fill CTE\n")
+                        else:
+                            f.write(f"{self._fmt_num(a)}\n")
 
             f.write("*TIE, NAME=tie-1\n")
             f.write("master_tie, slave_tie\n")
