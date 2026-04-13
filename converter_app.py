@@ -657,6 +657,18 @@ class ConverterApp:
                     f"({len(alt_slave_eids)} elements)"
                 )
 
+        # master 측도 동일하게 보강: CE 파싱 실패·파일럿 노드·ESLN 0개 등으로
+        # TIE_MASTER가 비어 있으면 기존 *MASTER*TIE* element 성분에서 재구성.
+        tie_master_eids = self._get_component_element_ids(mapdl, ["TIE_MASTER"])
+        if not tie_master_eids:
+            alt_master_eids = self._get_component_element_ids_by_keywords(mapdl, include=("MASTER", "TIE"))
+            if alt_master_eids and self._create_cm_from_element_list(mapdl, "TIE_MASTER", alt_master_eids):
+                created_cms.add("TIE_MASTER")
+                self._log(
+                    f"  Rebuilt CM TIE_MASTER from existing element component "
+                    f"({len(alt_master_eids)} elements)"
+                )
+
         mapdl.allsel("ALL")
 
         # ── 3) 보존 대상(TIE_SLAVE/TIE_MASTER)을 제외한 나머지 CM 네이밍 삭제 ──
