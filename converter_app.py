@@ -84,24 +84,21 @@ class ConverterApp:
             "Step 4 (Full)",
         ]
         self.run_upto_menu = tk.OptionMenu(frm_run, self.run_until, *step_options)
-        self.run_upto_menu.config(width=28, height=2)
+        self.run_upto_menu.config(width=28, height=1)
         self.run_upto_menu.pack(side="left", padx=(0, 15))
         self.btn_run = tk.Button(
-            frm_run, text="Run", command=self._run, width=14, height=2,
+            frm_run, text="Run", command=self._run, width=14, height=1,
             bg="#2E8B57", fg="white", activebackground="#3BA66B", activeforeground="white"
         )
-        self.btn_run.pack(side="right")
-
-        frm_step1_cmd = tk.Frame(self.root)
-        frm_step1_cmd.pack(fill="x", padx=10, pady=(0, 5))
         self.btn_show_step1 = tk.Button(
-            frm_step1_cmd,
+            frm_run,
             text="Show Step 1 Commands",
             command=self._show_step1_log,
             width=22,
-            height=2,
+            height=1,
         )
-        self.btn_show_step1.pack(side="left")
+        self.btn_run.pack(side="right")
+        self.btn_show_step1.pack(side="right", padx=(0, 8))
 
         # Path of the APDL log produced during the most recent Step 1 run.
         self._step1_log_path = None
@@ -495,12 +492,12 @@ class ConverterApp:
         created_cms = set()
 
         # ── 2) 노드 리스트로부터 CM 생성 (매크로로 NSEL,A 일괄 처리) ──
-        if slave_nodes and self._create_cm_from_node_list(mapdl, "TIE_SLAVE", slave_nodes):
+        if slave_nodes and self._create_cm_from_node_list(mapdl, "TIE_SLAVE", slave_nodes, as_elements=True):
             created_cms.add("TIE_SLAVE")
-            self._log(f"  Created CM TIE_SLAVE ({len(slave_nodes)} nodes)")
-        if master_nodes and self._create_cm_from_node_list(mapdl, "TIE_MASTER", master_nodes):
+            self._log(f"  Created CM TIE_SLAVE ({len(slave_nodes)} nodes -> ELEM component)")
+        if master_nodes and self._create_cm_from_node_list(mapdl, "TIE_MASTER", master_nodes, as_elements=True):
             created_cms.add("TIE_MASTER")
-            self._log(f"  Created CM TIE_MASTER ({len(master_nodes)} nodes)")
+            self._log(f"  Created CM TIE_MASTER ({len(master_nodes)} nodes -> ELEM component)")
 
         mapdl.allsel("ALL")
 
@@ -663,8 +660,8 @@ class ConverterApp:
                 pass
         return deleted
 
-    def _create_cm_from_node_list(self, mapdl, cm_name, nodes):
-        """Select the given node numbers and save them as a NODE component.
+    def _create_cm_from_node_list(self, mapdl, cm_name, nodes, as_elements=False):
+        """Select node numbers and save component as NODE or ELEM.
 
         Uses a local macro file with chunked NSEL,A lines to avoid
         per-call round-trips through PyMAPDL."""
@@ -677,7 +674,11 @@ class ConverterApp:
                 f.write("NSEL,NONE\n")
                 for node in sorted(nodes):
                     f.write(f"NSEL,A,NODE,,{node}\n")
-                f.write(f"CM,{cm_name},NODE\n")
+                if as_elements:
+                    f.write("ESLN,S\n")
+                    f.write(f"CM,{cm_name},ELEM\n")
+                else:
+                    f.write(f"CM,{cm_name},NODE\n")
                 f.write("ALLSEL,ALL\n")
             mapdl.input(macro_path)
             return True
@@ -781,7 +782,7 @@ class ConverterApp:
                 pass
             deleted += 1
 
-        self._log(f"  Deleted {deleted} / {len(unused)} unused material(s).")
+        self._log(f"  Deleted {deleted} / {len(all_mats)} unused material(s).")
 
     def _expand_etblock(self, cdb_path):
         """Replace every ETBLOCK block in a .cdb with ET/KEYOPT cards.
