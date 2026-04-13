@@ -381,11 +381,33 @@ class ConverterApp:
             bc_all = [best]
 
         master = self._get_component_element_ids(
-            mapdl, ["TIE_MASTER", "tie_master", "TIE_MAST", "MASTER_TIE", "master_tie", "MASTER_T"]
+            mapdl,
+            [
+                "TIE_MASTER", "tie_master", "TIE_MAST", "MASTER_TIE", "master_tie", "MASTER_T",
+                "MASTER", "master",
+            ],
         )
         slave = self._get_component_element_ids(
-            mapdl, ["TIE_SLAVE", "tie_slave", "TIE_SLAV", "SLAVE_TIE", "slave_tie", "SLAVE_TI"]
+            mapdl,
+            [
+                "TIE_SLAVE", "tie_slave", "TIE_SLAV", "SLAVE_TIE", "slave_tie", "SLAVE_TI",
+                "SLAVE", "slave",
+            ],
         )
+
+        # 일부 모델에서는 컴포넌트명이 규칙에서 살짝 벗어나거나(예: 접두/접미)
+        # 슬레이브만 이름이 달라서 누락될 수 있다. 이름 패턴 기반으로 한 번 더 보강.
+        if not master:
+            auto_master = self._get_component_element_ids_by_keywords(mapdl, include=("MASTER", "TIE"))
+            if auto_master:
+                master = auto_master
+                self._log(f"  tie master fallback by name pattern: {len(master)} element(s)")
+        if not slave:
+            auto_slave = self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE", "TIE"))
+            if auto_slave:
+                slave = auto_slave
+                self._log(f"  tie slave fallback by name pattern: {len(slave)} element(s)")
+
         self._log(f"  tie element sets: master={len(master)} slave={len(slave)}")
         mapdl.allsel("ALL")
 
@@ -399,6 +421,63 @@ class ConverterApp:
             "slave_tie": slave,
         }
 
+    def _get_component_element_ids_by_keywords(self, mapdl, include):
+        """Find a component by name keywords and return its element IDs.
+
+        Example: include=("SLAVE", "TIE") matches names like
+        TIE_SLAVE, SLAVE_TIE, MY_TIE_SLAVE_SET, etc.
+        """
+        names = self._list_all_components(mapdl)
+        if not names:
+            return []
+        keys = tuple(k.upper() for k in include)
+        for name in names:
+            up = name.upper()
+            if all(k in up for k in keys):
+                ids = self._get_component_element_ids(mapdl, [name])
+                if ids:
+                    return ids
+        return []
+
+    def _get_component_node_ids_by_keywords(self, mapdl, include):
+        """Find a component by name keywords and return its node IDs."""
+        names = self._list_all_components(mapdl)
+        if not names:
+            return []
+        keys = tuple(k.upper() for k in include)
+        for name in names:
+            up = name.upper()
+            if all(k in up for k in keys):
+                ids = self._get_component_node_ids(mapdl, [name])
+                if ids:
+                    return ids
+        return []
+
+    def _get_selected_element_ids_from_elist(self, mapdl):
+        """Parse selected element IDs from ELIST text output.
+
+        Using ELIST avoids relying on PyMAPDL mesh cache sync and has
+        proven more stable for component-based extraction.
+        """
+        try:
+            txt = mapdl.elist()
+        except Exception:
+            return []
+        if not txt:
+            return []
+
+        ids = set()
+        for line in str(txt).splitlines():
+            # ELIST 본문에서 요소 라인은 보통 숫자로 시작한다.
+            m = re.match(r"^\s*(\d+)\b", line)
+            if not m:
+                continue
+            try:
+                ids.add(int(m.group(1)))
+            except ValueError:
+                pass
+        return sorted(ids)
+
     def _get_component_element_ids(self, mapdl, candidates):
         existing = {name.upper(): name for name in self._list_all_components(mapdl)}
         target = None
@@ -408,43 +487,51 @@ class ConverterApp:
                 break
         if not target:
             return []
+
         try:
             ctype = self._get_component_type(mapdl, target)
+
+            # allsel 누락/잔여 선택 영향 최소화를 위해 항상 초기화 후 수행
+            mapdl.allsel("ALL")
+
             if ctype in {"ELEM", "ELEMENT"}:
-                mapdl.allsel("ALL")
                 mapdl.cmsel("S", target, "ELEM")
-                eids = [int(v) for v in mapdl.mesh.enum.tolist()]
-                return sorted(set(eids))
+                return sorted(set(self._get_selected_element_ids_from_elist(mapdl)))
+
             if ctype == "NODE":
-                mapdl.allsel("ALL")
                 mapdl.cmsel("S", target, "NODE")
                 try:
                     mapdl.esln("S")
                 except Exception:
                     pass
-                eids = [int(v) for v in mapdl.mesh.enum.tolist()]
-                return sorted(set(eids))
+                return sorted(set(self._get_selected_element_ids_from_elist(mapdl)))
+
             # Unknown 타입 fallback: NODE->ESLN 후 ELEM direct 순서로 시도
-            mapdl.allsel("ALL")
             mapdl.cmsel("S", target, "NODE")
             try:
                 mapdl.esln("S")
             except Exception:
                 pass
-            eids = [int(v) for v in mapdl.mesh.enum.tolist()]
+            eids = self._get_selected_element_ids_from_elist(mapdl)
             if eids:
                 return sorted(set(eids))
+
             mapdl.allsel("ALL")
             mapdl.cmsel("S", target, "ELEM")
-            eids = [int(v) for v in mapdl.mesh.enum.tolist()]
+            eids = self._get_selected_element_ids_from_elist(mapdl)
             if eids:
                 return sorted(set(eids))
+
             mapdl.allsel("ALL")
             mapdl.cmsel("S", target)
-            eids = [int(v) for v in mapdl.mesh.enum.tolist()]
-            return sorted(set(eids))
+            return sorted(set(self._get_selected_element_ids_from_elist(mapdl)))
         except Exception:
             return []
+        finally:
+            try:
+                mapdl.allsel("ALL")
+            except Exception:
+                pass
 
     def _get_component_type(self, mapdl, target_name):
         """Return component entity type from CMLIST output (NODE/ELEM/...)."""
@@ -494,6 +581,11 @@ class ConverterApp:
             return sorted(set(ids))
         except Exception:
             return []
+        finally:
+            try:
+                mapdl.allsel("ALL")
+            except Exception:
+                pass
 
     def _handle_ties_and_loads(self, mapdl):
         """Detect tie conditions defined via constraint equations (CE/CEINTF).
@@ -525,15 +617,23 @@ class ConverterApp:
             # slave 우선 - 양쪽에 동시에 들어간 노드는 master에서 제외
             master_nodes -= slave_nodes
 
-        # CELIST 파싱 실패 시 기존 컴포넌트명에서 fallback
-        if not slave_nodes and not master_nodes:
+        # CELIST 파싱 실패/부분실패 시 기존 컴포넌트명에서 fallback
+        if not slave_nodes or not master_nodes:
             existing = [n.upper() for n in self._list_all_components(mapdl)]
-            if any(name in existing for name in ("TIE_SLAVE", "SLAVE_TIE", "TIE_SLAV", "SLAVE_TI")):
+            if not slave_nodes and any(name in existing for name in ("TIE_SLAVE", "SLAVE_TIE", "TIE_SLAV", "SLAVE_TI")):
                 slave_nodes.update(self._get_component_node_ids(mapdl, ["TIE_SLAVE", "SLAVE_TIE", "TIE_SLAV", "SLAVE_TI", "tie_slave"]))
-            if any(name in existing for name in ("TIE_MASTER", "MASTER_TIE", "TIE_MAST", "MASTER_T")):
+            if not master_nodes and any(name in existing for name in ("TIE_MASTER", "MASTER_TIE", "TIE_MAST", "MASTER_T")):
                 master_nodes.update(self._get_component_node_ids(mapdl, ["TIE_MASTER", "MASTER_TIE", "TIE_MAST", "MASTER_T", "tie_master"]))
+            # 이름이 정형화되지 않은 경우 키워드 매칭으로 추가 보강
+            if not slave_nodes:
+                slave_nodes.update(self._get_component_node_ids_by_keywords(mapdl, include=("SLAVE", "TIE")))
+            if not master_nodes:
+                master_nodes.update(self._get_component_node_ids_by_keywords(mapdl, include=("MASTER", "TIE")))
             if slave_nodes or master_nodes:
-                self._log("  Fallback: reused existing TIE_MASTER/TIE_SLAVE components.")
+                self._log(
+                    f"  Fallback components: slave_nodes={len(slave_nodes)} "
+                    f"master_nodes={len(master_nodes)}"
+                )
 
         created_cms = set()
 
@@ -545,6 +645,18 @@ class ConverterApp:
             created_cms.add("TIE_MASTER")
             self._log(f"  Created CM TIE_MASTER ({len(master_nodes)} nodes -> ELEM component)")
 
+        # CE 기반 slave 노드가 파일럿 노드인 경우 ESLN 결과가 0개일 수 있다.
+        # 이때는 기존 slave/tie 성분에서 element 기반으로 재구성 시도.
+        tie_slave_eids = self._get_component_element_ids(mapdl, ["TIE_SLAVE"])
+        if not tie_slave_eids:
+            alt_slave_eids = self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE", "TIE"))
+            if alt_slave_eids and self._create_cm_from_element_list(mapdl, "TIE_SLAVE", alt_slave_eids):
+                created_cms.add("TIE_SLAVE")
+                self._log(
+                    f"  Rebuilt CM TIE_SLAVE from existing element component "
+                    f"({len(alt_slave_eids)} elements)"
+                )
+
         mapdl.allsel("ALL")
 
         # ── 3) 보존 대상(TIE_SLAVE/TIE_MASTER)을 제외한 나머지 CM 네이밍 삭제 ──
@@ -554,6 +666,10 @@ class ConverterApp:
         deleted_cm = 0
         for name in existing_cms:
             if name.upper() in created_cms:
+                continue
+            up = name.upper()
+            # 기존 tie 관련 컴포넌트는 보존 (이름이 다르면 후속 파싱에서 필요할 수 있음)
+            if ("TIE" in up and "SLAVE" in up) or ("TIE" in up and "MASTER" in up):
                 continue
             try:
                 mapdl.cmdele(name)
@@ -730,6 +846,25 @@ class ConverterApp:
             return True
         except Exception as e:
             self._log(f"  Warning: failed to create {cm_name}: {e}")
+            return False
+
+    def _create_cm_from_element_list(self, mapdl, cm_name, elems):
+        """Select element numbers and save component as ELEM."""
+        if not elems:
+            return False
+        macro_path = os.path.join(mapdl.directory, f"_mkcm_elem_{cm_name}.mac")
+        try:
+            with open(macro_path, "w") as f:
+                f.write("ALLSEL,ALL\n")
+                f.write("ESEL,NONE\n")
+                for eid in sorted(elems):
+                    f.write(f"ESEL,A,ELEM,,{eid}\n")
+                f.write(f"CM,{cm_name},ELEM\n")
+                f.write("ALLSEL,ALL\n")
+            mapdl.input(macro_path)
+            return True
+        except Exception as e:
+            self._log(f"  Warning: failed to create {cm_name} from elements: {e}")
             return False
 
     def _list_all_components(self, mapdl):
@@ -1066,6 +1201,10 @@ class ConverterApp:
         if not elems_by_mat:
             raise RuntimeError("EBLOCK에서 요소를 읽지 못했습니다.")
 
+        # Abaqus 입력 전 길이 스케일 보정 (x1000)
+        nodes = self._scale_nodes(nodes, 1000.0)
+        self._log("Applied coordinate scale-up: x1000")
+
         self._write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info)
         self._log(f"INP created: {inp_path}")
         self._log(
@@ -1298,6 +1437,15 @@ class ConverterApp:
             return f"{v:.9g}"
         return str(v)
 
+    def _scale_nodes(self, nodes, factor):
+        """Return scaled node coordinates by the given factor."""
+        if factor == 1.0:
+            return nodes
+        return {
+            nid: (xyz[0] * factor, xyz[1] * factor, xyz[2] * factor)
+            for nid, xyz in nodes.items()
+        }
+
     def _prop_rows(self, props, key):
         entry = props.get(key, {})
         return entry.get("rows", [])
@@ -1367,10 +1515,19 @@ class ConverterApp:
                 f.write(", ".join(str(v) for v in slave_eids[k:k + 16]) + "\n")
             if not slave_eids:
                 f.write("** TODO: fill element IDs\n")
-            f.write("*SURFACE, NAME=master_tie, TYPE=ELEMENT\n")
-            f.write("master_tie\n")
-            f.write("*SURFACE, NAME=slave_tie, TYPE=ELEMENT\n")
-            f.write("slave_tie\n")
+            # Abaqus element surface는 ELSET 이름만으로는 부족하고 face ID(S1~S6)가 필요.
+            # tie 면 방향 정보가 없는 템플릿 단계에서는 기본 face(S1)로 작성하고,
+            # set이 비어 있으면 surface 자체를 생략해 경고를 피한다.
+            if master_eids:
+                f.write("*SURFACE, NAME=master_tie, TYPE=ELEMENT\n")
+                f.write("master_tie, S1\n")
+            else:
+                f.write("** NOTE: master_tie surface skipped (empty element set)\n")
+            if slave_eids:
+                f.write("*SURFACE, NAME=slave_tie, TYPE=ELEMENT\n")
+                f.write("slave_tie, S1\n")
+            else:
+                f.write("** NOTE: slave_tie surface skipped (empty element set)\n")
 
             for mid in mat_ids:
                 mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
