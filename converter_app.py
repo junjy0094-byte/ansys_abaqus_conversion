@@ -439,6 +439,20 @@ class ConverterApp:
                     return ids
         return []
 
+    def _get_component_node_ids_by_keywords(self, mapdl, include):
+        """Find a component by name keywords and return its node IDs."""
+        names = self._list_all_components(mapdl)
+        if not names:
+            return []
+        keys = tuple(k.upper() for k in include)
+        for name in names:
+            up = name.upper()
+            if all(k in up for k in keys):
+                ids = self._get_component_node_ids(mapdl, [name])
+                if ids:
+                    return ids
+        return []
+
     def _get_selected_element_ids_from_elist(self, mapdl):
         """Parse selected element IDs from ELIST text output.
 
@@ -567,6 +581,11 @@ class ConverterApp:
             return sorted(set(ids))
         except Exception:
             return []
+        finally:
+            try:
+                mapdl.allsel("ALL")
+            except Exception:
+                pass
 
     def _handle_ties_and_loads(self, mapdl):
         """Detect tie conditions defined via constraint equations (CE/CEINTF).
@@ -598,15 +617,23 @@ class ConverterApp:
             # slave 우선 - 양쪽에 동시에 들어간 노드는 master에서 제외
             master_nodes -= slave_nodes
 
-        # CELIST 파싱 실패 시 기존 컴포넌트명에서 fallback
-        if not slave_nodes and not master_nodes:
+        # CELIST 파싱 실패/부분실패 시 기존 컴포넌트명에서 fallback
+        if not slave_nodes or not master_nodes:
             existing = [n.upper() for n in self._list_all_components(mapdl)]
-            if any(name in existing for name in ("TIE_SLAVE", "SLAVE_TIE", "TIE_SLAV", "SLAVE_TI")):
+            if not slave_nodes and any(name in existing for name in ("TIE_SLAVE", "SLAVE_TIE", "TIE_SLAV", "SLAVE_TI")):
                 slave_nodes.update(self._get_component_node_ids(mapdl, ["TIE_SLAVE", "SLAVE_TIE", "TIE_SLAV", "SLAVE_TI", "tie_slave"]))
-            if any(name in existing for name in ("TIE_MASTER", "MASTER_TIE", "TIE_MAST", "MASTER_T")):
+            if not master_nodes and any(name in existing for name in ("TIE_MASTER", "MASTER_TIE", "TIE_MAST", "MASTER_T")):
                 master_nodes.update(self._get_component_node_ids(mapdl, ["TIE_MASTER", "MASTER_TIE", "TIE_MAST", "MASTER_T", "tie_master"]))
+            # 이름이 정형화되지 않은 경우 키워드 매칭으로 추가 보강
+            if not slave_nodes:
+                slave_nodes.update(self._get_component_node_ids_by_keywords(mapdl, include=("SLAVE", "TIE")))
+            if not master_nodes:
+                master_nodes.update(self._get_component_node_ids_by_keywords(mapdl, include=("MASTER", "TIE")))
             if slave_nodes or master_nodes:
-                self._log("  Fallback: reused existing TIE_MASTER/TIE_SLAVE components.")
+                self._log(
+                    f"  Fallback components: slave_nodes={len(slave_nodes)} "
+                    f"master_nodes={len(master_nodes)}"
+                )
 
         created_cms = set()
 
@@ -627,6 +654,10 @@ class ConverterApp:
         deleted_cm = 0
         for name in existing_cms:
             if name.upper() in created_cms:
+                continue
+            up = name.upper()
+            # 기존 tie 관련 컴포넌트는 보존 (이름이 다르면 후속 파싱에서 필요할 수 있음)
+            if ("TIE" in up and "SLAVE" in up) or ("TIE" in up and "MASTER" in up):
                 continue
             try:
                 mapdl.cmdele(name)
