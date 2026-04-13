@@ -1453,10 +1453,19 @@ class ConverterApp:
                 f.write(", ".join(str(v) for v in slave_eids[k:k + 16]) + "\n")
             if not slave_eids:
                 f.write("** TODO: fill element IDs\n")
-            f.write("*SURFACE, NAME=master_tie, TYPE=ELEMENT\n")
-            f.write("master_tie\n")
-            f.write("*SURFACE, NAME=slave_tie, TYPE=ELEMENT\n")
-            f.write("slave_tie\n")
+            # Abaqus element surface는 ELSET 이름만으로는 부족하고 face ID(S1~S6)가 필요.
+            # tie 면 방향 정보가 없는 템플릿 단계에서는 기본 face(S1)로 작성하고,
+            # set이 비어 있으면 surface 자체를 생략해 경고를 피한다.
+            if master_eids:
+                f.write("*SURFACE, NAME=master_tie, TYPE=ELEMENT\n")
+                f.write("master_tie, S1\n")
+            else:
+                f.write("** NOTE: master_tie surface skipped (empty element set)\n")
+            if slave_eids:
+                f.write("*SURFACE, NAME=slave_tie, TYPE=ELEMENT\n")
+                f.write("slave_tie, S1\n")
+            else:
+                f.write("** NOTE: slave_tie surface skipped (empty element set)\n")
 
             for mid in mat_ids:
                 mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
