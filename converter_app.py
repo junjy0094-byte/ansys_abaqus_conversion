@@ -1,10 +1,10 @@
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox
 import threading
-import subprocess
 import os
 import re
 import shutil
+from collections import defaultdict
 
 
 class ConverterApp:
@@ -954,39 +954,240 @@ class ConverterApp:
         return cdb_path
 
     def _step4_convert(self, cdb_path):
-        """abaqus fromansys 실행"""
-        self._log("\n=== Step 4: abaqus fromansys ===")
+        """CDB를 직접 파싱해서 Abaqus INP 템플릿 생성"""
+        self._log("\n=== Step 4: direct text INP build (no fromansys) ===")
 
         out_dir = self.output_dir.get()
-        job_name = "converted_model"
-        # 확장자 제거
-        input_name = os.path.splitext(os.path.basename(cdb_path))[0]
+        inp_path = os.path.join(out_dir, "converted_model.inp")
 
-        cmd = f'{self.abaqus_cmd.get()} fromansys job={job_name} input={input_name}'
-        self._log(f"Running: {cmd}")
+        nodes = self._parse_cdb_nodes(cdb_path)
+        elems_by_mat = self._parse_cdb_elements_by_mat(cdb_path)
+        nsets = self._parse_cdb_nsets(cdb_path)
+        mat_ids = sorted(elems_by_mat.keys())
 
-        result = subprocess.run(
-            cmd, shell=True, cwd=out_dir,
-            capture_output=True, text=True
+        if not nodes:
+            raise RuntimeError("NBLOCK에서 노드를 읽지 못했습니다.")
+        if not elems_by_mat:
+            raise RuntimeError("EBLOCK에서 요소를 읽지 못했습니다.")
+
+        self._write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets)
+        self._log(f"INP created: {inp_path}")
+        self._log(
+            "NOTE: 재료 상세(온도의존/ENG CONSTANTS/CTE)는 템플릿 자리만 생성됩니다. "
+            "실제 값은 INP에서 채워주세요."
         )
 
-        if result.stdout:
-            self._log(result.stdout)
-        if result.stderr:
-            self._log(result.stderr)
+    def _parse_cdb_nodes(self, cdb_path):
+        """Parse NBLOCK and return {node_id: (x, y, z)}."""
+        with open(cdb_path, "r") as f:
+            lines = f.readlines()
 
-        inp_path = os.path.join(out_dir, f"{job_name}.inp")
-        log_path = os.path.join(out_dir, f"{job_name}.log")
+        nodes = {}
+        in_nblock = False
+        skip_format = False
+        num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?")
+        int_pat = re.compile(r"[-+]?\d+")
 
-        if os.path.exists(inp_path):
-            self._log(f"INP created: {inp_path}")
-        else:
-            self._log("[WARNING] INP file not found - check log for errors.")
+        for raw in lines:
+            s = raw.strip()
+            u = s.upper()
+            if not in_nblock and u.startswith("NBLOCK"):
+                in_nblock = True
+                skip_format = True
+                continue
+            if not in_nblock:
+                continue
+            if skip_format:
+                skip_format = False
+                continue
+            if s.startswith("-1"):
+                in_nblock = False
+                continue
+            if not s:
+                continue
 
-        if os.path.exists(log_path):
-            self._log(f"\n--- Conversion Log ({job_name}.log) ---")
-            with open(log_path, "r") as f:
-                self._log(f.read())
+            ints = int_pat.findall(s)
+            nums = num_pat.findall(s)
+            if not ints or len(nums) < 4:
+                continue
+            try:
+                nid = int(ints[0])
+                x, y, z = float(nums[-3]), float(nums[-2]), float(nums[-1])
+            except ValueError:
+                continue
+            nodes[nid] = (x, y, z)
+        return nodes
+
+    def _parse_cdb_elements_by_mat(self, cdb_path):
+        """Parse EBLOCK and return {mat_id: [(eid, [n1..n8]), ...]}.
+
+        NOTE: 이 파서는 SOLID C3D8 계열에 맞춘 간단 파서다.
+        """
+        with open(cdb_path, "r") as f:
+            lines = f.readlines()
+
+        elems_by_mat = defaultdict(list)
+        in_eblock = False
+        skip_format = False
+        int_pat = re.compile(r"[-+]?\d+")
+
+        for raw in lines:
+            s = raw.strip()
+            u = s.upper()
+            if not in_eblock and u.startswith("EBLOCK"):
+                in_eblock = True
+                skip_format = True
+                continue
+            if not in_eblock:
+                continue
+            if skip_format:
+                skip_format = False
+                continue
+            if s.startswith("-1"):
+                in_eblock = False
+                continue
+            if not s:
+                continue
+
+            vals = [int(x) for x in int_pat.findall(s)]
+            if len(vals) < 10:
+                continue
+
+            # 일반적인 SOLID EBLOCK 행 기준:
+            # [MAT, TYPE, REAL, SEC, ESYS, ..., EID, N1..N8]
+            mat_id = vals[0]
+            eid = vals[-9]
+            conn = vals[-8:]
+            if len(conn) == 8:
+                elems_by_mat[mat_id].append((eid, conn))
+        return elems_by_mat
+
+    def _parse_cdb_nsets(self, cdb_path):
+        """Parse NODE CMBLOCKs and return {name_lower: [node_ids]}."""
+        with open(cdb_path, "r") as f:
+            lines = f.readlines()
+
+        nsets = {}
+        i = 0
+        n = len(lines)
+        int_pat = re.compile(r"[-+]?\d+")
+        while i < n:
+            line = lines[i].strip()
+            if not line.upper().startswith("CMBLOCK"):
+                i += 1
+                continue
+
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                i += 1
+                continue
+            name = parts[1]
+            ent_type = parts[2].upper()
+            i += 1
+            if i < n and lines[i].lstrip().startswith("("):
+                i += 1
+            if ent_type != "NODE":
+                while i < n and not lines[i].strip().startswith("-1"):
+                    i += 1
+                i += 1
+                continue
+
+            node_ids = []
+            while i < n:
+                s = lines[i].strip()
+                if s.startswith("-1"):
+                    i += 1
+                    break
+                if s:
+                    node_ids.extend(int(x) for x in int_pat.findall(s) if int(x) > 0)
+                i += 1
+            if node_ids:
+                nsets[name.lower()] = sorted(set(node_ids))
+        return nsets
+
+    def _write_template_inp(self, inp_path, nodes, elems_by_mat, mat_ids, nsets):
+        with open(inp_path, "w") as f:
+            f.write("*NODE\n")
+            for nid in sorted(nodes):
+                x, y, z = nodes[nid]
+                f.write(f"{nid}, {x:.9g}, {y:.9g}, {z:.9g}\n")
+
+            for mid in mat_ids:
+                es = f"eset{mid}"
+                f.write(f"*ELEMENT,TYPE=C3D8I,ELSET={es}\n")
+                for eid, conn in sorted(elems_by_mat[mid], key=lambda x: x[0]):
+                    f.write(f"{eid}, " + ", ".join(str(n) for n in conn) + "\n")
+
+            eff_mats = []
+            for mid in mat_ids:
+                es = f"eset{mid}"
+                mat = f"mat{mid}"
+                if mat.upper().startswith("EFF"):
+                    eff_mats.append((es, mat))
+                else:
+                    f.write(f"*SOLID SECTION, ELSET={es}, MATERIAL={mat}\n")
+
+            if eff_mats:
+                f.write("*Orientation, name=Ori-1\n")
+                f.write("1,0,0,0,1,0\n")
+                f.write("1,0\n")
+                for es, mat in eff_mats:
+                    f.write(f"*SOLID SECTION, ELSET={es}, orientation=Ori-1, MATERIAL={mat}\n")
+
+            required_nsets = [
+                "nset_temperature",
+                "nset_bc_y",
+                "nset_bc_x",
+                "nset_bc_all",
+                "master_tie",
+                "slave_tie",
+            ]
+            for ns in required_nsets:
+                f.write(f"*NSET, NSET={ns}\n")
+                ids = nsets.get(ns, [])
+                for k in range(0, len(ids), 16):
+                    f.write(", ".join(str(v) for v in ids[k:k + 16]) + "\n")
+                if not ids:
+                    f.write("** TODO: fill node IDs\n")
+
+            f.write("*SURFACE, NAME=master_tie, TYPE=NODE\n")
+            f.write("master_tie\n")
+            f.write("*SURFACE, NAME=slave_tie, TYPE=NODE\n")
+            f.write("slave_tie\n")
+
+            for mid in mat_ids:
+                mat = f"mat{mid}"
+                f.write(f"*MATERIAL, NAME={mat}\n")
+                f.write("** TODO: choose one of below blocks\n")
+                f.write("** 1) Isotropic at room temperature\n")
+                f.write("*ELASTIC\n")
+                f.write("210000., 0.30\n")
+                f.write("*EXPANSION\n")
+                f.write("1.2e-5\n")
+                f.write("** 2) Temperature-dependent isotropic\n")
+                f.write("** *ELASTIC\n")
+                f.write("** E, nu, T1\n")
+                f.write("** *EXPANSION\n")
+                f.write("** CTE, T1\n")
+                if mat.upper().startswith("EFF"):
+                    f.write("*ELASTIC, TYPE=ENGINEERING CONSTANTS\n")
+                    f.write("** Ex, Ey, Ez, vxy, vyz, vxz, Gxy, Gyz, Gxz, T\n")
+                    f.write("*EXPANSION, TYPE=ORTHOTROPIC\n")
+                    f.write("** ctex, ctey, ctez\n")
+
+            f.write("*TIE, NAME=tie-1\n")
+            f.write("master_tie, slave_tie\n")
+            f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
+            f.write("NSET_TEMPERATURE,183.0\n")
+            f.write("*STEP, INC=10000, NAME=step, NLGEOM=NO\n")
+            f.write("*STATIC\n")
+            f.write("1.0, 1.0, 1.0e-15, 1.0\n")
+            f.write("*TEMPERATURE, OP=NEW\n")
+            f.write("NSET_TEMPERATURE, 25.0\n")
+            f.write("*BOUNDARY\n")
+            f.write("NSET_BC_Y,XSYMM\n")
+            f.write("NSET_BC_X,YSYMM\n")
+            f.write("NSET_BC_ALL,3,,0\n")
 
 
 if __name__ == "__main__":
