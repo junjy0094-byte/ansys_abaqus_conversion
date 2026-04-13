@@ -223,11 +223,6 @@ class ConverterApp:
             self._log("Removing unused material properties...")
             self._remove_unused_mats(mapdl)
 
-            # 넘버링 압축 (MAT 제외 - 물성 번호는 압축하지 않음)
-            self._log("Compressing numbering...")
-            for entity in ["NODE", "ELEM"]:
-                mapdl.numcmp(entity)
-
             mapdl.allsel("ALL")
 
             # --- Step 2a: 새 DB 저장 (원본 오염 방지) ---
@@ -324,6 +319,10 @@ class ConverterApp:
                 pass
         self._log("  Deleted all applied loads/BCs.")
 
+        # ── 6) 모든 TABLE 파라미터 삭제 ──
+        n_tables = self._delete_all_tables(mapdl)
+        self._log(f"  Deleted {n_tables} table parameter(s).")
+
     def _parse_celist(self, mapdl):
         """Dump CELIST to a text file and parse it.
 
@@ -394,6 +393,50 @@ class ConverterApp:
             return []
 
         return equations
+
+    def _delete_all_tables(self, mapdl):
+        """Delete every TABLE-type parameter in the current MAPDL session.
+
+        Dumps `*STATUS,_PRM` to a text file, parses out parameter rows whose
+        type column is TABLE, and `*DEL`s each one. Underscore-prefixed
+        parameters are skipped because they belong to PyMAPDL internals."""
+        macro_path = os.path.join(mapdl.directory, "_dump_params.mac")
+        try:
+            with open(macro_path, "w") as f:
+                f.write("/OUTPUT,_params,txt\n")
+                f.write("*STATUS,_PRM\n")
+                f.write("/OUTPUT\n")
+            mapdl.input(macro_path)
+        except Exception:
+            return 0
+
+        params_path = os.path.join(mapdl.directory, "_params.txt")
+        table_names = []
+        ident_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+        try:
+            with open(params_path, "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    name = parts[0]
+                    if not ident_re.match(name):
+                        continue
+                    if name.startswith("_"):
+                        continue
+                    if any(p.upper() == "TABLE" for p in parts[1:]):
+                        table_names.append(name)
+        except FileNotFoundError:
+            return 0
+
+        deleted = 0
+        for name in table_names:
+            try:
+                mapdl.run(f"*DEL,{name},,NOPR")
+                deleted += 1
+            except Exception:
+                pass
+        return deleted
 
     def _create_cm_from_node_list(self, mapdl, cm_name, nodes):
         """Select the given node numbers and save them as a NODE component.
