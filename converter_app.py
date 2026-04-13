@@ -416,6 +416,20 @@ class ConverterApp:
                 self._log(f"  tie slave fallback by name pattern: {len(slave)} element(s)")
 
         self._log(f"  tie element sets: master={len(master)} slave={len(slave)}")
+
+        # step4 에서 평면 분할을 하기 위해 실제 tie 표면 노드도 가져온다.
+        # _handle_ties_and_loads 가 CE 로부터 만든 TIE_MASTER_NODES /
+        # TIE_SLAVE_NODES NODE component 에서 읽는다. 없으면 빈 리스트.
+        master_tie_nodes = self._get_component_node_ids(
+            mapdl, ["TIE_MASTER_NODES", "tie_master_nodes"]
+        )
+        slave_tie_nodes = self._get_component_node_ids(
+            mapdl, ["TIE_SLAVE_NODES", "tie_slave_nodes"]
+        )
+        self._log(
+            f"  tie surface nodes: master={len(master_tie_nodes)} "
+            f"slave={len(slave_tie_nodes)}"
+        )
         mapdl.allsel("ALL")
 
         return {
@@ -426,6 +440,9 @@ class ConverterApp:
             # tie 계열은 node-set이 아니라 element-set으로 사용
             "master_tie": master,
             "slave_tie": slave,
+            # step4 평면 분할용 표면 노드 집합 (없으면 비어있음)
+            "master_tie_nodes": master_tie_nodes,
+            "slave_tie_nodes": slave_tie_nodes,
         }
 
     def _get_component_element_ids_by_keywords(self, mapdl, include):
@@ -558,6 +575,8 @@ class ConverterApp:
                 f.write("/NERR,0,99999999\n")
                 f.write("CMSEL,S,TIE_MASTER\n")
                 f.write("CMSEL,A,TIE_SLAVE\n")
+                f.write("CMSEL,A,TIE_MASTER_NODES\n")
+                f.write("CMSEL,A,TIE_SLAVE_NODES\n")
                 f.write("/NERR,5,99999999\n")
                 f.write("/OUTPUT,_cmlist_type_tie,txt\n")
                 f.write("CMLIST\n")
@@ -670,6 +689,24 @@ class ConverterApp:
         if master_nodes and self._create_cm_from_node_list(mapdl, "TIE_MASTER", master_nodes, as_elements=True):
             created_cms.add("TIE_MASTER")
             self._log(f"  Created CM TIE_MASTER ({len(master_nodes)} nodes -> ELEM component)")
+
+        # step4 의 평면(plane) 분할을 위해 실제 tie 표면 노드 집합도 별도
+        # NODE component 로 보존한다. CE 로부터 얻은 master/slave 노드가
+        # 정확한 표면 노드이므로 이를 그대로 저장한다.
+        if slave_nodes and self._create_cm_from_node_list(
+            mapdl, "TIE_SLAVE_NODES", slave_nodes, as_elements=False
+        ):
+            created_cms.add("TIE_SLAVE_NODES")
+            self._log(
+                f"  Created CM TIE_SLAVE_NODES ({len(slave_nodes)} nodes -> NODE component)"
+            )
+        if master_nodes and self._create_cm_from_node_list(
+            mapdl, "TIE_MASTER_NODES", master_nodes, as_elements=False
+        ):
+            created_cms.add("TIE_MASTER_NODES")
+            self._log(
+                f"  Created CM TIE_MASTER_NODES ({len(master_nodes)} nodes -> NODE component)"
+            )
 
         # CE 기반 slave/master 노드가 파일럿 노드인 경우 ESLN 결과가 0개일 수
         # 있고, 그 외에도 user 모델이 surface-based tie(CONTA174/TARGE170)
@@ -952,6 +989,8 @@ class ConverterApp:
                 f.write("/NERR,0,99999999\n")
                 f.write("CMSEL,S,TIE_MASTER\n")
                 f.write("CMSEL,A,TIE_SLAVE\n")
+                f.write("CMSEL,A,TIE_MASTER_NODES\n")
+                f.write("CMSEL,A,TIE_SLAVE_NODES\n")
                 f.write("/NERR,5,99999999\n")
                 f.write("/OUTPUT,_cmlist_tie,txt\n")
                 f.write("CMLIST\n")
@@ -1568,6 +1607,197 @@ class ConverterApp:
     def _temps_from_rows(self, rows):
         return sorted({t for t, _ in rows if t is not None})
 
+    # ──────────────────────────────────────────────────────────────────
+    # tie surface 평면 분할 유틸
+    # ──────────────────────────────────────────────────────────────────
+
+    # Abaqus C3D8 local face → local node indices (0-base).
+    # ANSYS EBLOCK 에서 읽은 SOLID185 connectivity 도 동일한 로컬 노드
+    # 번호 체계(1..8 → conn[0..7]) 를 따른다고 가정한다.
+    _C3D8_FACES = (
+        (1, (0, 1, 2, 3)),  # S1: 1-2-3-4  (bottom)
+        (2, (4, 5, 6, 7)),  # S2: 5-6-7-8  (top)
+        (3, (0, 1, 5, 4)),  # S3: 1-2-6-5
+        (4, (1, 2, 6, 5)),  # S4: 2-3-7-6
+        (5, (2, 3, 7, 6)),  # S5: 3-4-8-7
+        (6, (3, 0, 4, 7)),  # S6: 4-1-5-8
+    )
+
+    def _hex_faces(self, conn):
+        """Return [(face_id_1to6, (n1,n2,n3,n4)), ...] for a C3D8 connectivity."""
+        return [(fid, tuple(conn[i] for i in idx)) for fid, idx in self._C3D8_FACES]
+
+    def _axis_aligned_plane(self, face_coords, tol):
+        """4개 face 노드 좌표가 축 정렬 평면에 있으면 (axis, offset) 반환."""
+        xs = [p[0] for p in face_coords]
+        ys = [p[1] for p in face_coords]
+        zs = [p[2] for p in face_coords]
+        if max(xs) - min(xs) <= tol:
+            return ("x", sum(xs) / len(xs))
+        if max(ys) - min(ys) <= tol:
+            return ("y", sum(ys) / len(ys))
+        if max(zs) - min(zs) <= tol:
+            return ("z", sum(zs) / len(zs))
+        return None
+
+    def _split_tie_surface_planes(
+        self, elems_all, nodes, tie_eids, tie_surface_nodes, tol_dist
+    ):
+        """tie 볼륨 요소들을 축 정렬 평면별로 분할.
+
+        Parameters
+        ----------
+        elems_all : dict[int, list[int]]
+            {eid: [n1..n8]} — 전체 요소 connectivity.
+        nodes : dict[int, tuple[float,float,float]]
+            노드 좌표 (step4 에서 x1000 스케일 후).
+        tie_eids : iterable[int]
+            tie 쪽 볼륨 요소 ID.
+        tie_surface_nodes : iterable[int] | None
+            tie 면에 실제로 놓여 있는 노드 ID 집합. CE 기반 경로에서는
+            정확한 surface 노드이고, fallback 에서는 비어 있을 수 있다.
+            비어 있으면 tie element set 의 "boundary face" 를 geometry
+            기준으로 추출한다 (인접 tie element 와 공유되지 않는 face).
+        tol_dist : float
+            축 정렬 판정 및 동일 offset 그룹 허용치.
+
+        Returns
+        -------
+        list[dict]
+            [{"axis": "x"|"y"|"z", "offset": float,
+              "faces": [(eid, face_id_1_to_6), ...]}, ...]
+        """
+        tie_eid_set = {int(e) for e in tie_eids or []}
+        surface_node_set = {int(n) for n in tie_surface_nodes or []}
+
+        # 1) 후보 face 수집
+        candidate_faces = []  # [(eid, fid, (n1..n4))]
+        if surface_node_set:
+            for eid in tie_eid_set:
+                conn = elems_all.get(eid)
+                if not conn or len(conn) < 8:
+                    continue
+                for fid, fnodes in self._hex_faces(conn):
+                    if all(n in surface_node_set for n in fnodes):
+                        candidate_faces.append((eid, fid, fnodes))
+        else:
+            # Fallback: boundary face 추출 (tie element set 안에서 공유되지
+            # 않는 face). 같은 4 노드 집합을 가진 face 가 여러 개면 내부면.
+            counter = {}
+            bucket = {}
+            for eid in tie_eid_set:
+                conn = elems_all.get(eid)
+                if not conn or len(conn) < 8:
+                    continue
+                for fid, fnodes in self._hex_faces(conn):
+                    key = frozenset(fnodes)
+                    counter[key] = counter.get(key, 0) + 1
+                    bucket.setdefault(key, []).append((eid, fid, fnodes))
+            for key, cnt in counter.items():
+                if cnt == 1:
+                    candidate_faces.extend(bucket[key])
+
+        # 2) 축 정렬 평면 판정
+        typed = []  # [(axis, offset, eid, fid)]
+        skipped_non_axis = 0
+        for eid, fid, fnodes in candidate_faces:
+            coords = [nodes.get(int(n)) for n in fnodes]
+            if any(c is None for c in coords):
+                continue
+            plane = self._axis_aligned_plane(coords, tol_dist)
+            if plane is None:
+                skipped_non_axis += 1
+                continue
+            axis, offset = plane
+            typed.append((axis, offset, eid, fid))
+        if skipped_non_axis:
+            self._log(
+                f"  plane split: skipped {skipped_non_axis} non-axis-aligned face(s)"
+            )
+
+        # 3) axis 별로 offset 오름차순 정렬 후 tol 이내 연속 offset 을 한 그룹
+        groups = []
+        for axis in ("x", "y", "z"):
+            subset = sorted([t for t in typed if t[0] == axis], key=lambda t: t[1])
+            i = 0
+            while i < len(subset):
+                members = [(subset[i][2], subset[i][3])]
+                offsets = [subset[i][1]]
+                j = i + 1
+                while j < len(subset) and subset[j][1] - offsets[-1] <= tol_dist:
+                    members.append((subset[j][2], subset[j][3]))
+                    offsets.append(subset[j][1])
+                    j += 1
+                groups.append(
+                    {
+                        "axis": axis,
+                        "offset": sum(offsets) / len(offsets),
+                        "faces": members,
+                    }
+                )
+                i = j
+
+        # 안정 순서: axis(x→y→z) → offset 오름차순
+        groups.sort(key=lambda g: (g["axis"], g["offset"]))
+        return groups
+
+    def _write_tie_plane_section(self, f, side, tie_eids, plane_groups):
+        """side ∈ {'master','slave'}. 평면별 ELSET/SURFACE 를 기록하고
+        평면 전체를 합친 union SURFACE(``{side}_tie``) 도 기록한다.
+        """
+        tie_eids = sorted(set(int(e) for e in tie_eids or []))
+        prefix = f"{side}_tie"
+
+        # 볼륨 전체 ELSET (legacy — 참조용으로 유지)
+        f.write(f"*ELSET, ELSET={prefix}\n")
+        if tie_eids:
+            for k in range(0, len(tie_eids), 16):
+                f.write(", ".join(str(v) for v in tie_eids[k:k + 16]) + "\n")
+        else:
+            f.write("** TODO: fill element IDs\n")
+
+        if not plane_groups:
+            # 평면 분할 실패 — 경고만 남기고 단일 surface 로 폴백
+            if tie_eids:
+                f.write(f"*SURFACE, NAME={prefix}, TYPE=ELEMENT\n")
+                f.write(f"{prefix}, S1\n")
+                f.write(
+                    f"** WARNING: {prefix} plane split failed, "
+                    f"using single face S1 fallback\n"
+                )
+            else:
+                f.write(f"** NOTE: {prefix} surface skipped (empty element set)\n")
+            return
+
+        # 평면별 ELSET (face 별로 하위 분리)
+        union_face_entries = []  # [(elset_name, face_id), ...]
+        for idx, grp in enumerate(plane_groups, start=1):
+            by_fid = {}
+            for eid, fid in grp["faces"]:
+                by_fid.setdefault(fid, set()).add(int(eid))
+            for fid in sorted(by_fid.keys()):
+                eids = sorted(by_fid[fid])
+                elset_name = f"{prefix}_p{idx}_S{fid}"
+                f.write(f"*ELSET, ELSET={elset_name}\n")
+                for k in range(0, len(eids), 16):
+                    f.write(", ".join(str(v) for v in eids[k:k + 16]) + "\n")
+                union_face_entries.append((elset_name, fid))
+
+            # plane 당 SURFACE
+            surf_name = f"{prefix}_p{idx}"
+            f.write(f"*SURFACE, NAME={surf_name}, TYPE=ELEMENT\n")
+            for fid in sorted(by_fid.keys()):
+                f.write(f"{prefix}_p{idx}_S{fid}, S{fid}\n")
+            f.write(
+                f"** tie plane {idx}: axis={grp['axis']} "
+                f"offset={grp['offset']:.6g} faces={len(grp['faces'])}\n"
+            )
+
+        # 전체 union SURFACE (모든 plane ELSET / face 참조)
+        f.write(f"*SURFACE, NAME={prefix}, TYPE=ELEMENT\n")
+        for elset_name, fid in union_face_entries:
+            f.write(f"{elset_name}, S{fid}\n")
+
     def _write_template_inp(self, inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info):
         with open(inp_path, "w") as f:
             f.write("*NODE\n")
@@ -1613,29 +1843,46 @@ class ConverterApp:
 
             master_eids = nsets.get("master_tie", []) or nsets.get("tie_master", [])
             slave_eids = nsets.get("slave_tie", []) or nsets.get("tie_slave", [])
-            f.write("*ELSET, ELSET=master_tie\n")
-            for k in range(0, len(master_eids), 16):
-                f.write(", ".join(str(v) for v in master_eids[k:k + 16]) + "\n")
-            if not master_eids:
-                f.write("** TODO: fill element IDs\n")
-            f.write("*ELSET, ELSET=slave_tie\n")
-            for k in range(0, len(slave_eids), 16):
-                f.write(", ".join(str(v) for v in slave_eids[k:k + 16]) + "\n")
-            if not slave_eids:
-                f.write("** TODO: fill element IDs\n")
-            # Abaqus element surface는 ELSET 이름만으로는 부족하고 face ID(S1~S6)가 필요.
-            # tie 면 방향 정보가 없는 템플릿 단계에서는 기본 face(S1)로 작성하고,
-            # set이 비어 있으면 surface 자체를 생략해 경고를 피한다.
-            if master_eids:
-                f.write("*SURFACE, NAME=master_tie, TYPE=ELEMENT\n")
-                f.write("master_tie, S1\n")
-            else:
-                f.write("** NOTE: master_tie surface skipped (empty element set)\n")
-            if slave_eids:
-                f.write("*SURFACE, NAME=slave_tie, TYPE=ELEMENT\n")
-                f.write("slave_tie, S1\n")
-            else:
-                f.write("** NOTE: slave_tie surface skipped (empty element set)\n")
+            master_surf_nodes = (
+                nsets.get("master_tie_nodes", [])
+                or nsets.get("tie_master_nodes", [])
+            )
+            slave_surf_nodes = (
+                nsets.get("slave_tie_nodes", [])
+                or nsets.get("tie_slave_nodes", [])
+            )
+
+            # 모든 요소 connectivity 를 단일 dict 로 flatten (face 판정용)
+            elems_all = {}
+            for _mid, _lst in elems_by_mat.items():
+                for _eid, _conn in _lst:
+                    elems_all[int(_eid)] = _conn
+
+            # 허용 거리: 0.001 (post-scale 단위, 즉 1mm 대비 1e-3)
+            tie_tol = 0.001
+            master_planes = self._split_tie_surface_planes(
+                elems_all, nodes, master_eids, master_surf_nodes, tol_dist=tie_tol
+            )
+            slave_planes = self._split_tie_surface_planes(
+                elems_all, nodes, slave_eids, slave_surf_nodes, tol_dist=tie_tol
+            )
+            self._log(
+                f"  tie plane split: master={len(master_planes)} "
+                f"slave={len(slave_planes)} (tol_dist={tie_tol})"
+            )
+            for idx, grp in enumerate(master_planes, start=1):
+                self._log(
+                    f"    master_tie_p{idx}: axis={grp['axis']} "
+                    f"offset={grp['offset']:.6g} faces={len(grp['faces'])}"
+                )
+            for idx, grp in enumerate(slave_planes, start=1):
+                self._log(
+                    f"    slave_tie_p{idx}: axis={grp['axis']} "
+                    f"offset={grp['offset']:.6g} faces={len(grp['faces'])}"
+                )
+
+            self._write_tie_plane_section(f, "master", master_eids, master_planes)
+            self._write_tie_plane_section(f, "slave", slave_eids, slave_planes)
 
             for mid in mat_ids:
                 mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
