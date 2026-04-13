@@ -31,7 +31,7 @@ class ConverterApp:
         self.mapdl_version = tk.StringVar(value="242")
         self.nproc = tk.StringVar(value="4")
         self.ram = tk.StringVar(value="")
-        self.license_type = tk.StringVar(value="ansys")
+        self.license_type = tk.StringVar(value="preppost")
         self.extra_switches = tk.StringVar(value="")
 
         self._build_ui()
@@ -85,7 +85,7 @@ class ConverterApp:
         tk.Entry(frm_mapdl, textvariable=self.ram, width=8).grid(row=0, column=5, sticky="w", padx=5)
 
         tk.Label(frm_mapdl, text="License Type:").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        license_options = ["ansys", "mech", "struct", "dyna", "preppost", "enterprise"]
+        license_options = ["preppost", "ansys", "mech", "struct", "dyna", "enterprise"]
         tk.OptionMenu(frm_mapdl, self.license_type, *license_options).grid(row=1, column=1, sticky="w", padx=5, pady=(5, 0))
 
         tk.Label(frm_mapdl, text="Extra Switches:").grid(row=1, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
@@ -1079,7 +1079,15 @@ class ConverterApp:
         elems_by_mat = self._parse_cdb_elements_by_mat(cdb_path)
         nset_txt = os.path.join(out_dir, "step1_nsets.txt")
         mplist_txt = os.path.join(out_dir, "step1_mplist.txt")
-        nsets = self._read_nsets_txt(nset_txt) if os.path.exists(nset_txt) else self._parse_cdb_nsets(cdb_path)
+        cdb_nsets = self._parse_cdb_nsets(cdb_path)
+        if os.path.exists(nset_txt):
+            nsets = self._read_nsets_txt(nset_txt)
+            # step1_nsets에 일부가 비어있으면 CDB의 CMBLOCK(tie_master/tie_slave 등)으로 보강
+            for k, vals in cdb_nsets.items():
+                if not nsets.get(k):
+                    nsets[k] = vals
+        else:
+            nsets = cdb_nsets
         mat_info = self._read_materials_from_mplist_txt(mplist_txt) if os.path.exists(mplist_txt) else {}
         mat_ids = sorted(mat_info.keys()) if mat_info else sorted(elems_by_mat.keys())
 
