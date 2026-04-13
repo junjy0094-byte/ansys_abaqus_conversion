@@ -439,24 +439,30 @@ class ConverterApp:
                     return ids
         return []
 
-    def _iter_selected_element_ids(self, mapdl, max_iter=10000000):
-        """Return currently selected element IDs using APDL *GET NXTH traversal.
+    def _get_selected_element_ids_from_elist(self, mapdl):
+        """Parse selected element IDs from ELIST text output.
 
-        This is more reliable than `mapdl.mesh.enum` for some sessions where
-        mesh caches can lag behind selection state.
+        Using ELIST avoids relying on PyMAPDL mesh cache sync and has
+        proven more stable for component-based extraction.
         """
-        ids = []
-        current = 0
-        for _ in range(max_iter):
+        try:
+            txt = mapdl.elist()
+        except Exception:
+            return []
+        if not txt:
+            return []
+
+        ids = set()
+        for line in str(txt).splitlines():
+            # ELIST 본문에서 요소 라인은 보통 숫자로 시작한다.
+            m = re.match(r"^\s*(\d+)\b", line)
+            if not m:
+                continue
             try:
-                nxt = int(mapdl.get("_ENEXT", "ELEM", current, "NUM", "NXTH"))
-            except Exception:
-                break
-            if nxt <= 0 or nxt == current:
-                break
-            ids.append(nxt)
-            current = nxt
-        return ids
+                ids.add(int(m.group(1)))
+            except ValueError:
+                pass
+        return sorted(ids)
 
     def _get_component_element_ids(self, mapdl, candidates):
         existing = {name.upper(): name for name in self._list_all_components(mapdl)}
@@ -476,7 +482,7 @@ class ConverterApp:
 
             if ctype in {"ELEM", "ELEMENT"}:
                 mapdl.cmsel("S", target, "ELEM")
-                return sorted(set(self._iter_selected_element_ids(mapdl)))
+                return sorted(set(self._get_selected_element_ids_from_elist(mapdl)))
 
             if ctype == "NODE":
                 mapdl.cmsel("S", target, "NODE")
@@ -484,7 +490,7 @@ class ConverterApp:
                     mapdl.esln("S")
                 except Exception:
                     pass
-                return sorted(set(self._iter_selected_element_ids(mapdl)))
+                return sorted(set(self._get_selected_element_ids_from_elist(mapdl)))
 
             # Unknown 타입 fallback: NODE->ESLN 후 ELEM direct 순서로 시도
             mapdl.cmsel("S", target, "NODE")
@@ -492,19 +498,19 @@ class ConverterApp:
                 mapdl.esln("S")
             except Exception:
                 pass
-            eids = self._iter_selected_element_ids(mapdl)
+            eids = self._get_selected_element_ids_from_elist(mapdl)
             if eids:
                 return sorted(set(eids))
 
             mapdl.allsel("ALL")
             mapdl.cmsel("S", target, "ELEM")
-            eids = self._iter_selected_element_ids(mapdl)
+            eids = self._get_selected_element_ids_from_elist(mapdl)
             if eids:
                 return sorted(set(eids))
 
             mapdl.allsel("ALL")
             mapdl.cmsel("S", target)
-            return sorted(set(self._iter_selected_element_ids(mapdl)))
+            return sorted(set(self._get_selected_element_ids_from_elist(mapdl)))
         except Exception:
             return []
         finally:
