@@ -1,10 +1,10 @@
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox
 import threading
-import subprocess
 import os
 import re
 import shutil
+from collections import defaultdict
 
 
 class ConverterApp:
@@ -23,16 +23,10 @@ class ConverterApp:
         # NOTE: abaqus fromansys (Step 4) requires BLOCKED nblock/eblock,
         # so a full Step 4 run forces BLOCKED regardless of this flag.
         self.cdwrite_unblocked = tk.BooleanVar(value=True)
-        # Step 3 text-level CDB cleanup toggle. When disabled, the .cdb
-        # produced by Step 1&2 is passed straight to Step 4.
-        self.cdb_cleanup_enabled = tk.BooleanVar(value=True)
-
         # MAPDL launch settings
         self.mapdl_version = tk.StringVar(value="242")
         self.nproc = tk.StringVar(value="4")
-        self.ram = tk.StringVar(value="")
-        self.license_type = tk.StringVar(value="ansys")
-        self.extra_switches = tk.StringVar(value="")
+        self.license_type = tk.StringVar(value="preppost")
 
         self._build_ui()
 
@@ -65,12 +59,6 @@ class ConverterApp:
             variable=self.cdwrite_unblocked,
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 0))
 
-        tk.Checkbutton(
-            frm_set,
-            text="Run Step 3 CDB text cleanup",
-            variable=self.cdb_cleanup_enabled,
-        ).grid(row=2, column=0, columnspan=4, sticky="w")
-
         # --- MAPDL Launch Settings ---
         frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
         frm_mapdl.pack(fill="x", padx=10, pady=5)
@@ -81,33 +69,9 @@ class ConverterApp:
         tk.Label(frm_mapdl, text="Processors:").grid(row=0, column=2, sticky="w", padx=(15, 0))
         tk.Entry(frm_mapdl, textvariable=self.nproc, width=6).grid(row=0, column=3, sticky="w", padx=5)
 
-        tk.Label(frm_mapdl, text="RAM MB (blank=auto):").grid(row=0, column=4, sticky="w", padx=(15, 0))
-        tk.Entry(frm_mapdl, textvariable=self.ram, width=8).grid(row=0, column=5, sticky="w", padx=5)
-
         tk.Label(frm_mapdl, text="License Type:").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        license_options = ["ansys", "mech", "struct", "dyna", "preppost", "enterprise"]
+        license_options = ["preppost", "ansys", "mech", "struct", "dyna", "enterprise"]
         tk.OptionMenu(frm_mapdl, self.license_type, *license_options).grid(row=1, column=1, sticky="w", padx=5, pady=(5, 0))
-
-        tk.Label(frm_mapdl, text="Extra Switches:").grid(row=1, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
-        tk.Entry(frm_mapdl, textvariable=self.extra_switches, width=30).grid(
-            row=1, column=3, columnspan=3, sticky="w", padx=5, pady=(5, 0)
-        )
-
-        # --- Step 3: Remove Blocks ---
-        frm_blk = tk.LabelFrame(self.root, text="Step 3 - CDB Command Blocks to Remove (one per line)", padx=10, pady=5)
-        frm_blk.pack(fill="x", padx=10, pady=5)
-
-        self.txt_blocks = tk.Text(frm_blk, height=12, width=80)
-        self.txt_blocks.pack(fill="x")
-        default_cards = [
-            "/COM", "/TITLE", "DOF", "ANTYPE", "ACEL",
-            "CGLOC", "CGOMGA", "DCGOMG", "DOMEGA", "IRLF",
-            "OMEGA", "KUSE", "ALPHAD", "BETAD", "DMPRAT",
-            "CRPLIM", "NCNV", "ERESX", "TIME", "NEQIT",
-            "TREF", "BFUNIF", "TOFFST", "NUMOFF", "CECMOD",
-            "CE", "UnsupportedCard",
-        ]
-        self.txt_blocks.insert("1.0", "\n".join(default_cards))
 
         # --- Run ---
         frm_run = tk.Frame(self.root, pady=5)
@@ -117,20 +81,24 @@ class ConverterApp:
         tk.Label(frm_run, text="Run up to:").pack(side="left", padx=(0, 5))
         step_options = [
             "Step 1&2 (Cleanup + CDWRITE)",
-            "Step 3 (CDB Text Clean)",
             "Step 4 (Full)",
         ]
-        tk.OptionMenu(frm_run, self.run_until, *step_options).pack(side="left", padx=(0, 15))
-        self.btn_run = tk.Button(frm_run, text="Run", command=self._run, width=14, height=2)
-        self.btn_run.pack(side="left")
+        self.run_upto_menu = tk.OptionMenu(frm_run, self.run_until, *step_options)
+        self.run_upto_menu.config(width=28, height=1)
+        self.run_upto_menu.pack(side="left", padx=(0, 15))
+        self.btn_run = tk.Button(
+            frm_run, text="Run", command=self._run, width=14, height=1,
+            bg="#2E8B57", fg="white", activebackground="#3BA66B", activeforeground="white"
+        )
         self.btn_show_step1 = tk.Button(
             frm_run,
             text="Show Step 1 Commands",
             command=self._show_step1_log,
             width=22,
-            height=2,
+            height=1,
         )
-        self.btn_show_step1.pack(side="left", padx=(10, 0))
+        self.btn_run.pack(side="right")
+        self.btn_show_step1.pack(side="right", padx=(0, 8))
 
         # Path of the APDL log produced during the most recent Step 1 run.
         self._step1_log_path = None
@@ -214,20 +182,7 @@ class ConverterApp:
             if "Step 1&2" in until:
                 self._log("\n=== Stopped after Step 1&2 ===")
                 return
-
-            if self.cdb_cleanup_enabled.get():
-                cdb_path = self._step3_clean_cdb()
-            else:
-                self._log("\n=== Step 3: CDB text cleanup DISABLED ===")
-                cdb_path = os.path.join(self.output_dir.get(), "clean_model.cdb")
-            if "Step 3" in until:
-                self._log("\n=== Stopped after Step 3 ===")
-                return
-
-            # Placeholder: additional CDB adjustments between Step 3 and Step 4.
-            # Details will be configured later.
-            cdb_path = self._step3_5_extra(cdb_path)
-
+            cdb_path = os.path.join(self.output_dir.get(), "clean_model.cdb")
             self._step4_convert(cdb_path)
             self._log("\n=== All steps completed ===")
         except Exception as e:
@@ -253,18 +208,15 @@ class ConverterApp:
             version = 242
 
         nproc = int(self.nproc.get().strip()) if self.nproc.get().strip() else 4
-        ram = int(self.ram.get().strip()) if self.ram.get().strip() else None
-        license_type = self.license_type.get().strip() or "ansys"
-        extra_switches = self.extra_switches.get().strip() or ""
+        license_type = self.license_type.get().strip() or "preppost"
 
         mapdl = launch_mapdl(
             run_location=out_dir,
             override=True,
             version=version,
             nproc=nproc,
-            ram=ram,
             license_type=license_type,
-            additional_switches=extra_switches,
+            additional_switches="-smp",
         )
         self._log(f"MAPDL launched (v{mapdl.version})")
 
@@ -354,9 +306,286 @@ class ConverterApp:
                         f"classic format (abaqus fromansys compatible)."
                     )
 
+            self._export_step1_metadata(mapdl, out_dir)
+
         finally:
-            mapdl.exit()
+            try:
+                mapdl.exit()
+            except Exception:
+                try:
+                    mapdl.exit(force=True)
+                except Exception as e:
+                    self._log(f"MAPDL exit warning: {e}")
             self._log("MAPDL closed.")
+
+    def _export_step1_metadata(self, mapdl, out_dir):
+        """Save nset/material metadata from MAPDL to text files."""
+        nset_path = os.path.join(out_dir, "step1_nsets.txt")
+        mplist_path = os.path.join(out_dir, "step1_mplist.txt")
+
+        nset_data = self._collect_nset_data(mapdl)
+        with open(nset_path, "w") as f:
+            for name, ids in nset_data.items():
+                f.write(f"[{name}]\n")
+                for i in range(0, len(ids), 16):
+                    f.write(", ".join(str(v) for v in ids[i:i + 16]) + "\n")
+                f.write("\n")
+        self._log(f"Saved nset metadata: {nset_path}")
+
+        self._dump_mapdl_mplist(mapdl, mplist_path)
+        self._log(f"Saved material metadata: {mplist_path}")
+
+    def _dump_mapdl_mplist(self, mapdl, mplist_path):
+        macro_path = os.path.join(mapdl.directory, "_dump_mplist_for_step4.mac")
+        with open(macro_path, "w") as f:
+            f.write("/OUTPUT,_mplist_step4,txt\n")
+            f.write("MPLIST,ALL\n")
+            f.write("/OUTPUT\n")
+        mapdl.input(macro_path)
+        src = os.path.join(mapdl.directory, "_mplist_step4.txt")
+        try:
+            shutil.copy2(src, mplist_path)
+        except Exception:
+            with open(mplist_path, "w") as f:
+                f.write("")
+
+    def _collect_nset_data(self, mapdl):
+        """Collect required nset lists directly from node coordinates/components."""
+        mapdl.allsel("ALL")
+        nnum = [int(v) for v in mapdl.mesh.nnum.tolist()]
+        coords = mapdl.mesh.nodes
+        node_xyz = {
+            int(nid): (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+            for nid, xyz in zip(nnum, coords)
+        }
+        tol = 1.0e-12
+        min_x = min(v[0] for v in node_xyz.values())
+        min_y = min(v[1] for v in node_xyz.values())
+        min_z = min(v[2] for v in node_xyz.values())
+
+        bc_x = sorted(nid for nid, (x, _, _) in node_xyz.items() if abs(x - min_x) <= tol)
+        bc_y = sorted(nid for nid, (_, y, _) in node_xyz.items() if abs(y - min_y) <= tol)
+
+        xyz_candidates = [
+            nid for nid, (x, y, z) in node_xyz.items()
+            if abs(x - min_x) <= tol and abs(y - min_y) <= tol and abs(z - min_z) <= tol
+        ]
+        if xyz_candidates:
+            bc_all = [min(xyz_candidates)]
+        else:
+            # 완전 일치 노드가 없으면 최소점에 가장 가까운 노드 1개 선택
+            best = min(
+                node_xyz.items(),
+                key=lambda kv: abs(kv[1][0] - min_x) + abs(kv[1][1] - min_y) + abs(kv[1][2] - min_z),
+            )[0]
+            bc_all = [best]
+
+        master = self._get_component_element_ids(
+            mapdl,
+            [
+                "TIE_MASTER", "tie_master", "TIE_MAST", "MASTER_TIE", "master_tie", "MASTER_T",
+                "MASTER", "master",
+            ],
+        )
+        slave = self._get_component_element_ids(
+            mapdl,
+            [
+                "TIE_SLAVE", "tie_slave", "TIE_SLAV", "SLAVE_TIE", "slave_tie", "SLAVE_TI",
+                "SLAVE", "slave",
+            ],
+        )
+
+        # 일부 모델에서는 컴포넌트명이 규칙에서 살짝 벗어나거나(예: 접두/접미)
+        # 슬레이브만 이름이 달라서 누락될 수 있다. 이름 패턴 기반으로 한 번 더 보강.
+        if not master:
+            auto_master = self._get_component_element_ids_by_keywords(mapdl, include=("MASTER", "TIE"))
+            if auto_master:
+                master = auto_master
+                self._log(f"  tie master fallback by name pattern: {len(master)} element(s)")
+        if not slave:
+            auto_slave = self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE", "TIE"))
+            if auto_slave:
+                slave = auto_slave
+                self._log(f"  tie slave fallback by name pattern: {len(slave)} element(s)")
+
+        self._log(f"  tie element sets: master={len(master)} slave={len(slave)}")
+        mapdl.allsel("ALL")
+
+        return {
+            "nset_temperature": sorted(nnum),
+            "nset_bc_x": bc_x,
+            "nset_bc_y": bc_y,
+            "nset_bc_all": bc_all,
+            # tie 계열은 node-set이 아니라 element-set으로 사용
+            "master_tie": master,
+            "slave_tie": slave,
+        }
+
+    def _get_component_element_ids_by_keywords(self, mapdl, include):
+        """Find a component by name keywords and return its element IDs.
+
+        Example: include=("SLAVE", "TIE") matches names like
+        TIE_SLAVE, SLAVE_TIE, MY_TIE_SLAVE_SET, etc.
+        """
+        names = self._list_all_components(mapdl)
+        if not names:
+            return []
+        keys = tuple(k.upper() for k in include)
+        for name in names:
+            up = name.upper()
+            if all(k in up for k in keys):
+                ids = self._get_component_element_ids(mapdl, [name])
+                if ids:
+                    return ids
+        return []
+
+    def _get_component_node_ids_by_keywords(self, mapdl, include):
+        """Find a component by name keywords and return its node IDs."""
+        names = self._list_all_components(mapdl)
+        if not names:
+            return []
+        keys = tuple(k.upper() for k in include)
+        for name in names:
+            up = name.upper()
+            if all(k in up for k in keys):
+                ids = self._get_component_node_ids(mapdl, [name])
+                if ids:
+                    return ids
+        return []
+
+    def _get_selected_element_ids_from_elist(self, mapdl):
+        """Parse selected element IDs from ELIST text output.
+
+        Using ELIST avoids relying on PyMAPDL mesh cache sync and has
+        proven more stable for component-based extraction.
+        """
+        try:
+            txt = mapdl.elist()
+        except Exception:
+            return []
+        if not txt:
+            return []
+
+        ids = set()
+        for line in str(txt).splitlines():
+            # ELIST 본문에서 요소 라인은 보통 숫자로 시작한다.
+            m = re.match(r"^\s*(\d+)\b", line)
+            if not m:
+                continue
+            try:
+                ids.add(int(m.group(1)))
+            except ValueError:
+                pass
+        return sorted(ids)
+
+    def _get_component_element_ids(self, mapdl, candidates):
+        existing = {name.upper(): name for name in self._list_all_components(mapdl)}
+        target = None
+        for c in candidates:
+            if c.upper() in existing:
+                target = existing[c.upper()]
+                break
+        if not target:
+            return []
+
+        try:
+            ctype = self._get_component_type(mapdl, target)
+
+            # allsel 누락/잔여 선택 영향 최소화를 위해 항상 초기화 후 수행
+            mapdl.allsel("ALL")
+
+            if ctype in {"ELEM", "ELEMENT"}:
+                mapdl.cmsel("S", target, "ELEM")
+                return sorted(set(self._get_selected_element_ids_from_elist(mapdl)))
+
+            if ctype == "NODE":
+                mapdl.cmsel("S", target, "NODE")
+                try:
+                    mapdl.esln("S")
+                except Exception:
+                    pass
+                return sorted(set(self._get_selected_element_ids_from_elist(mapdl)))
+
+            # Unknown 타입 fallback: NODE->ESLN 후 ELEM direct 순서로 시도
+            mapdl.cmsel("S", target, "NODE")
+            try:
+                mapdl.esln("S")
+            except Exception:
+                pass
+            eids = self._get_selected_element_ids_from_elist(mapdl)
+            if eids:
+                return sorted(set(eids))
+
+            mapdl.allsel("ALL")
+            mapdl.cmsel("S", target, "ELEM")
+            eids = self._get_selected_element_ids_from_elist(mapdl)
+            if eids:
+                return sorted(set(eids))
+
+            mapdl.allsel("ALL")
+            mapdl.cmsel("S", target)
+            return sorted(set(self._get_selected_element_ids_from_elist(mapdl)))
+        except Exception:
+            return []
+        finally:
+            try:
+                mapdl.allsel("ALL")
+            except Exception:
+                pass
+
+    def _get_component_type(self, mapdl, target_name):
+        """Return component entity type from CMLIST output (NODE/ELEM/...)."""
+        macro_path = os.path.join(mapdl.directory, "_dump_cmlist_type.mac")
+        try:
+            with open(macro_path, "w") as f:
+                f.write("/OUTPUT,_cmlist_type,txt\n")
+                f.write("CMLIST\n")
+                f.write("/OUTPUT\n")
+            mapdl.input(macro_path)
+        except Exception:
+            return None
+        cmlist_path = os.path.join(mapdl.directory, "_cmlist_type.txt")
+        try:
+            with open(cmlist_path, "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].upper() == target_name.upper():
+                        return parts[1].upper()
+        except FileNotFoundError:
+            return None
+        return None
+
+    def _get_component_node_ids(self, mapdl, candidates):
+        existing = {name.upper(): name for name in self._list_all_components(mapdl)}
+        target = None
+        for c in candidates:
+            if c.upper() in existing:
+                target = existing[c.upper()]
+                break
+        if not target:
+            return []
+        try:
+            mapdl.allsel("ALL")
+            mapdl.cmsel("S", target, "NODE")
+            ids = [int(v) for v in mapdl.mesh.nnum.tolist()]
+            if ids:
+                return sorted(set(ids))
+            # Fallback: 컴포넌트가 ELEM 타입인 경우 요소 선택 후 노드 확장
+            mapdl.allsel("ALL")
+            mapdl.cmsel("S", target)
+            try:
+                mapdl.nsle("S")
+            except Exception:
+                pass
+            ids = [int(v) for v in mapdl.mesh.nnum.tolist()]
+            return sorted(set(ids))
+        except Exception:
+            return []
+        finally:
+            try:
+                mapdl.allsel("ALL")
+            except Exception:
+                pass
 
     def _handle_ties_and_loads(self, mapdl):
         """Detect tie conditions defined via constraint equations (CE/CEINTF).
@@ -388,15 +617,45 @@ class ConverterApp:
             # slave 우선 - 양쪽에 동시에 들어간 노드는 master에서 제외
             master_nodes -= slave_nodes
 
+        # CELIST 파싱 실패/부분실패 시 기존 컴포넌트명에서 fallback
+        if not slave_nodes or not master_nodes:
+            existing = [n.upper() for n in self._list_all_components(mapdl)]
+            if not slave_nodes and any(name in existing for name in ("TIE_SLAVE", "SLAVE_TIE", "TIE_SLAV", "SLAVE_TI")):
+                slave_nodes.update(self._get_component_node_ids(mapdl, ["TIE_SLAVE", "SLAVE_TIE", "TIE_SLAV", "SLAVE_TI", "tie_slave"]))
+            if not master_nodes and any(name in existing for name in ("TIE_MASTER", "MASTER_TIE", "TIE_MAST", "MASTER_T")):
+                master_nodes.update(self._get_component_node_ids(mapdl, ["TIE_MASTER", "MASTER_TIE", "TIE_MAST", "MASTER_T", "tie_master"]))
+            # 이름이 정형화되지 않은 경우 키워드 매칭으로 추가 보강
+            if not slave_nodes:
+                slave_nodes.update(self._get_component_node_ids_by_keywords(mapdl, include=("SLAVE", "TIE")))
+            if not master_nodes:
+                master_nodes.update(self._get_component_node_ids_by_keywords(mapdl, include=("MASTER", "TIE")))
+            if slave_nodes or master_nodes:
+                self._log(
+                    f"  Fallback components: slave_nodes={len(slave_nodes)} "
+                    f"master_nodes={len(master_nodes)}"
+                )
+
         created_cms = set()
 
         # ── 2) 노드 리스트로부터 CM 생성 (매크로로 NSEL,A 일괄 처리) ──
-        if slave_nodes and self._create_cm_from_node_list(mapdl, "TIE_SLAVE", slave_nodes):
+        if slave_nodes and self._create_cm_from_node_list(mapdl, "TIE_SLAVE", slave_nodes, as_elements=True):
             created_cms.add("TIE_SLAVE")
-            self._log(f"  Created CM TIE_SLAVE ({len(slave_nodes)} nodes)")
-        if master_nodes and self._create_cm_from_node_list(mapdl, "TIE_MASTER", master_nodes):
+            self._log(f"  Created CM TIE_SLAVE ({len(slave_nodes)} nodes -> ELEM component)")
+        if master_nodes and self._create_cm_from_node_list(mapdl, "TIE_MASTER", master_nodes, as_elements=True):
             created_cms.add("TIE_MASTER")
-            self._log(f"  Created CM TIE_MASTER ({len(master_nodes)} nodes)")
+            self._log(f"  Created CM TIE_MASTER ({len(master_nodes)} nodes -> ELEM component)")
+
+        # CE 기반 slave 노드가 파일럿 노드인 경우 ESLN 결과가 0개일 수 있다.
+        # 이때는 기존 slave/tie 성분에서 element 기반으로 재구성 시도.
+        tie_slave_eids = self._get_component_element_ids(mapdl, ["TIE_SLAVE"])
+        if not tie_slave_eids:
+            alt_slave_eids = self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE", "TIE"))
+            if alt_slave_eids and self._create_cm_from_element_list(mapdl, "TIE_SLAVE", alt_slave_eids):
+                created_cms.add("TIE_SLAVE")
+                self._log(
+                    f"  Rebuilt CM TIE_SLAVE from existing element component "
+                    f"({len(alt_slave_eids)} elements)"
+                )
 
         mapdl.allsel("ALL")
 
@@ -407,6 +666,10 @@ class ConverterApp:
         deleted_cm = 0
         for name in existing_cms:
             if name.upper() in created_cms:
+                continue
+            up = name.upper()
+            # 기존 tie 관련 컴포넌트는 보존 (이름이 다르면 후속 파싱에서 필요할 수 있음)
+            if ("TIE" in up and "SLAVE" in up) or ("TIE" in up and "MASTER" in up):
                 continue
             try:
                 mapdl.cmdele(name)
@@ -473,7 +736,8 @@ class ConverterApp:
         # MAPDL CELIST 노드 라인 패턴 (두 가지 가능한 포맷 모두 수용)
         node_patterns = [
             re.compile(r"NODE\s*=\s*(\d+)", re.IGNORECASE),
-            re.compile(r"^\s*(\d+)\s+[A-Za-z]{1,4}\s+[-+0-9.Ee]+"),
+            # e.g. "  12345 UX 1.0000E+00"
+            re.compile(r"^\s*(\d+)\s+(UX|UY|UZ|ROTX|ROTY|ROTZ|TEMP)\s+[-+0-9.Ee]+", re.IGNORECASE),
         ]
         header_pat = re.compile(r"CONSTRAINT\s+EQUATION", re.IGNORECASE)
 
@@ -558,8 +822,8 @@ class ConverterApp:
                 pass
         return deleted
 
-    def _create_cm_from_node_list(self, mapdl, cm_name, nodes):
-        """Select the given node numbers and save them as a NODE component.
+    def _create_cm_from_node_list(self, mapdl, cm_name, nodes, as_elements=False):
+        """Select node numbers and save component as NODE or ELEM.
 
         Uses a local macro file with chunked NSEL,A lines to avoid
         per-call round-trips through PyMAPDL."""
@@ -572,12 +836,35 @@ class ConverterApp:
                 f.write("NSEL,NONE\n")
                 for node in sorted(nodes):
                     f.write(f"NSEL,A,NODE,,{node}\n")
-                f.write(f"CM,{cm_name},NODE\n")
+                if as_elements:
+                    f.write("ESLN,S\n")
+                    f.write(f"CM,{cm_name},ELEM\n")
+                else:
+                    f.write(f"CM,{cm_name},NODE\n")
                 f.write("ALLSEL,ALL\n")
             mapdl.input(macro_path)
             return True
         except Exception as e:
             self._log(f"  Warning: failed to create {cm_name}: {e}")
+            return False
+
+    def _create_cm_from_element_list(self, mapdl, cm_name, elems):
+        """Select element numbers and save component as ELEM."""
+        if not elems:
+            return False
+        macro_path = os.path.join(mapdl.directory, f"_mkcm_elem_{cm_name}.mac")
+        try:
+            with open(macro_path, "w") as f:
+                f.write("ALLSEL,ALL\n")
+                f.write("ESEL,NONE\n")
+                for eid in sorted(elems):
+                    f.write(f"ESEL,A,ELEM,,{eid}\n")
+                f.write(f"CM,{cm_name},ELEM\n")
+                f.write("ALLSEL,ALL\n")
+            mapdl.input(macro_path)
+            return True
+        except Exception as e:
+            self._log(f"  Warning: failed to create {cm_name} from elements: {e}")
             return False
 
     def _list_all_components(self, mapdl):
@@ -676,65 +963,7 @@ class ConverterApp:
                 pass
             deleted += 1
 
-        self._log(f"  Deleted {deleted} / {len(unused)} unused material(s).")
-
-    def _step3_clean_cdb(self):
-        """CDB 텍스트에서 불필요한 커맨드 블록 제거"""
-        self._log("\n=== Step 3: CDB text cleanup ===")
-
-        out_dir = self.output_dir.get()
-        src = os.path.join(out_dir, "clean_model.cdb")
-        dst = os.path.join(out_dir, "clean_model_trimmed.cdb")
-
-        remove_blocks = [
-            line.strip()
-            for line in self.txt_blocks.get("1.0", "end").splitlines()
-            if line.strip()
-        ]
-
-        if not remove_blocks:
-            self._log("No blocks to remove, copying as-is.")
-            shutil.copy(src, dst)
-            return dst
-
-        self._log(f"Removing blocks starting with: {remove_blocks}")
-
-        with open(src, "r") as f:
-            lines = f.readlines()
-
-        def _line_matches(stripped_upper, patterns):
-            for pat in patterns:
-                pU = pat.upper()
-                if stripped_upper == pU:
-                    return True
-                if stripped_upper.startswith(pU + ","):
-                    return True
-                if stripped_upper.startswith(pU + " "):
-                    return True
-            return False
-
-        out_lines = []
-        skip = False
-        removed_count = 0
-
-        for line in lines:
-            stripped = line.strip()
-            stripped_upper = stripped.upper()
-            if _line_matches(stripped_upper, remove_blocks):
-                skip = True
-                removed_count += 1
-                continue
-            # 새 블록 시작 시 (들여쓰기 없는 비어있지 않은 줄) skip 해제
-            if skip and stripped and not line[0].isspace():
-                skip = False
-            if not skip:
-                out_lines.append(line)
-
-        with open(dst, "w") as f:
-            f.writelines(out_lines)
-
-        self._log(f"Removed {removed_count} block(s). Saved: {dst}")
-        return dst
+        self._log(f"  Deleted {deleted} / {len(all_mats)} unused material(s).")
 
     def _expand_etblock(self, cdb_path):
         """Replace every ETBLOCK block in a .cdb with ET/KEYOPT cards.
@@ -944,49 +1173,459 @@ class ConverterApp:
                 f.writelines(out_lines)
         return changed
 
-    def _step3_5_extra(self, cdb_path):
-        """Placeholder stage between Step 3 and Step 4.
-
-        Additional CDB/INP adjustments will be defined here later.
-        For now this is a no-op that returns the input CDB path unchanged.
-        """
-        self._log("\n=== Step 3.5: (placeholder - to be configured later) ===")
-        return cdb_path
-
     def _step4_convert(self, cdb_path):
-        """abaqus fromansys 실행"""
-        self._log("\n=== Step 4: abaqus fromansys ===")
+        """CDB를 직접 파싱해서 Abaqus INP 템플릿 생성"""
+        self._log("\n=== Step 4: direct text INP build (no fromansys) ===")
 
         out_dir = self.output_dir.get()
-        job_name = "converted_model"
-        # 확장자 제거
-        input_name = os.path.splitext(os.path.basename(cdb_path))[0]
+        inp_path = os.path.join(out_dir, "converted_model.inp")
 
-        cmd = f'{self.abaqus_cmd.get()} fromansys job={job_name} input={input_name}'
-        self._log(f"Running: {cmd}")
+        nodes = self._parse_cdb_nodes(cdb_path)
+        elems_by_mat = self._parse_cdb_elements_by_mat(cdb_path)
+        nset_txt = os.path.join(out_dir, "step1_nsets.txt")
+        mplist_txt = os.path.join(out_dir, "step1_mplist.txt")
+        cdb_nsets = self._parse_cdb_nsets(cdb_path)
+        if os.path.exists(nset_txt):
+            nsets = self._read_nsets_txt(nset_txt)
+            # step1_nsets에 일부가 비어있으면 CDB의 CMBLOCK(tie_master/tie_slave 등)으로 보강
+            for k, vals in cdb_nsets.items():
+                if not nsets.get(k):
+                    nsets[k] = vals
+        else:
+            nsets = cdb_nsets
+        mat_info = self._read_materials_from_mplist_txt(mplist_txt) if os.path.exists(mplist_txt) else {}
+        mat_ids = sorted(mat_info.keys()) if mat_info else sorted(elems_by_mat.keys())
 
-        result = subprocess.run(
-            cmd, shell=True, cwd=out_dir,
-            capture_output=True, text=True
+        if not nodes:
+            raise RuntimeError("NBLOCK에서 노드를 읽지 못했습니다.")
+        if not elems_by_mat:
+            raise RuntimeError("EBLOCK에서 요소를 읽지 못했습니다.")
+
+        # Abaqus 입력 전 길이 스케일 보정 (x1000)
+        nodes = self._scale_nodes(nodes, 1000.0)
+        self._log("Applied coordinate scale-up: x1000")
+
+        self._write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info)
+        self._log(f"INP created: {inp_path}")
+        self._log(
+            "NOTE: 재료 상세(온도의존/ENG CONSTANTS/CTE)는 템플릿 자리만 생성됩니다. "
+            "실제 값은 INP에서 채워주세요."
         )
 
-        if result.stdout:
-            self._log(result.stdout)
-        if result.stderr:
-            self._log(result.stderr)
+    def _parse_cdb_nodes(self, cdb_path):
+        """Parse NBLOCK and return {node_id: (x, y, z)}."""
+        with open(cdb_path, "r") as f:
+            lines = f.readlines()
 
-        inp_path = os.path.join(out_dir, f"{job_name}.inp")
-        log_path = os.path.join(out_dir, f"{job_name}.log")
+        nodes = {}
+        in_nblock = False
+        skip_format = False
+        num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?")
+        int_pat = re.compile(r"[-+]?\d+")
 
-        if os.path.exists(inp_path):
-            self._log(f"INP created: {inp_path}")
-        else:
-            self._log("[WARNING] INP file not found - check log for errors.")
+        for raw in lines:
+            s = raw.strip()
+            u = s.upper()
+            if not in_nblock and u.startswith("NBLOCK"):
+                in_nblock = True
+                skip_format = True
+                continue
+            if not in_nblock:
+                continue
+            if skip_format:
+                skip_format = False
+                continue
+            if s.startswith("-1"):
+                in_nblock = False
+                continue
+            if not s:
+                continue
 
-        if os.path.exists(log_path):
-            self._log(f"\n--- Conversion Log ({job_name}.log) ---")
-            with open(log_path, "r") as f:
-                self._log(f.read())
+            ints = int_pat.findall(s)
+            nums = num_pat.findall(s)
+            if not ints or len(nums) < 4:
+                continue
+            try:
+                nid = int(ints[0])
+                x, y, z = float(nums[-3]), float(nums[-2]), float(nums[-1])
+            except ValueError:
+                continue
+            nodes[nid] = (x, y, z)
+        return nodes
+
+    def _parse_cdb_elements_by_mat(self, cdb_path):
+        """Parse EBLOCK and return {mat_id: [(eid, [n1..n8]), ...]}.
+
+        NOTE: 이 파서는 SOLID C3D8 계열에 맞춘 간단 파서다.
+        """
+        with open(cdb_path, "r") as f:
+            lines = f.readlines()
+
+        elems_by_mat = defaultdict(list)
+        in_eblock = False
+        skip_format = False
+        int_pat = re.compile(r"[-+]?\d+")
+
+        for raw in lines:
+            s = raw.strip()
+            u = s.upper()
+            if not in_eblock and u.startswith("EBLOCK"):
+                in_eblock = True
+                skip_format = True
+                continue
+            if not in_eblock:
+                continue
+            if skip_format:
+                skip_format = False
+                continue
+            if s.startswith("-1"):
+                in_eblock = False
+                continue
+            if not s:
+                continue
+
+            vals = [int(x) for x in int_pat.findall(s)]
+            if len(vals) < 10:
+                continue
+
+            # 일반적인 SOLID EBLOCK 행 기준:
+            # [MAT, TYPE, REAL, SEC, ESYS, ..., EID, N1..N8]
+            mat_id = vals[0]
+            eid = vals[-9]
+            conn = vals[-8:]
+            if len(conn) == 8:
+                elems_by_mat[mat_id].append((eid, conn))
+        return elems_by_mat
+
+    def _parse_cdb_nsets(self, cdb_path):
+        """Parse NODE CMBLOCKs and return {name_lower: [node_ids]}."""
+        with open(cdb_path, "r") as f:
+            lines = f.readlines()
+
+        nsets = {}
+        i = 0
+        n = len(lines)
+        int_pat = re.compile(r"[-+]?\d+")
+        while i < n:
+            line = lines[i].strip()
+            if not line.upper().startswith("CMBLOCK"):
+                i += 1
+                continue
+
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                i += 1
+                continue
+            name = parts[1]
+            ent_type = parts[2].upper()
+            i += 1
+            if i < n and lines[i].lstrip().startswith("("):
+                i += 1
+            if ent_type != "NODE":
+                while i < n and not lines[i].strip().startswith("-1"):
+                    i += 1
+                i += 1
+                continue
+
+            node_ids = []
+            while i < n:
+                s = lines[i].strip()
+                if s.startswith("-1"):
+                    i += 1
+                    break
+                if s:
+                    node_ids.extend(int(x) for x in int_pat.findall(s) if int(x) > 0)
+                i += 1
+            if node_ids:
+                nsets[name.lower()] = sorted(set(node_ids))
+        return nsets
+
+    def _read_nsets_txt(self, nset_path):
+        nsets = {}
+        cur = None
+        int_pat = re.compile(r"[-+]?\d+")
+        with open(nset_path, "r") as f:
+            for raw in f:
+                s = raw.strip()
+                if not s:
+                    continue
+                if s.startswith("[") and s.endswith("]"):
+                    cur = s[1:-1].strip().lower()
+                    nsets[cur] = []
+                    continue
+                if cur is None:
+                    continue
+                for tok in int_pat.findall(s):
+                    nsets[cur].append(int(tok))
+        for k in list(nsets.keys()):
+            nsets[k] = sorted(set(nsets[k]))
+        return nsets
+
+    def _read_materials_from_mplist_txt(self, mplist_path):
+        """Parse MPLIST-like text tables with tabs/newlines/blank temps.
+
+        Returns:
+            {
+              mat_id: {
+                'name': 'mat{id}',
+                'props': {
+                  'ex': {'ref_temp': 183.0|None, 'rows': [(temp|None, value), ...]},
+                  ...
+                },
+                'raw_lines': [...]
+              }
+            }
+        """
+        mats = {}
+        cur_id = None
+        cur_prop = None
+        num_re = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?")
+
+        def _to_float(tok):
+            try:
+                return float(tok)
+            except ValueError:
+                return None
+
+        with open(mplist_path, "r") as f:
+            for raw in f:
+                line = raw.rstrip("\n")
+                s = line.strip()
+                if not s:
+                    continue
+
+                m = re.search(r"MATERIAL\s+NUMBER\s*=?\s*(\d+)", s, re.IGNORECASE)
+                if m:
+                    cur_id = int(m.group(1))
+                    mats[cur_id] = {"name": f"mat{cur_id}", "raw_lines": [], "props": {}}
+                    cur_prop = None
+                    continue
+                if cur_id is None:
+                    continue
+                mats[cur_id]["raw_lines"].append(line)
+
+                # ex) "temp ex", "temp alpx reference temp.=183"
+                if re.match(r"^\s*temp\b", s, re.IGNORECASE):
+                    parts = s.split()
+                    if len(parts) >= 2:
+                        cur_prop = parts[1].strip().lower()
+                        ref_match = re.search(r"reference\s*temp\.?\s*=\s*(" + num_re.pattern + ")", s, re.IGNORECASE)
+                        ref_temp = float(ref_match.group(1)) if ref_match else None
+                        mats[cur_id]["props"].setdefault(cur_prop, {"ref_temp": ref_temp, "rows": []})
+                        if ref_temp is not None:
+                            mats[cur_id]["props"][cur_prop]["ref_temp"] = ref_temp
+                    continue
+
+                if not cur_prop:
+                    continue
+                nums = re.findall(num_re, s)
+                # 빈 temperature(상수값) 케이스: 값 1개만 있는 행
+                if len(nums) == 1:
+                    val = _to_float(nums[0])
+                    if val is not None:
+                        mats[cur_id]["props"][cur_prop]["rows"].append((None, val))
+                    continue
+                # 일반 케이스: temp + value
+                t = _to_float(nums[0]) if len(nums) >= 1 else None
+                v = _to_float(nums[1]) if len(nums) >= 2 else None
+                if t is not None and v is not None:
+                    mats[cur_id]["props"][cur_prop]["rows"].append((t, v))
+        return mats
+
+    def _fmt_num(self, v):
+        if isinstance(v, (int, float)):
+            return f"{v:.9g}"
+        return str(v)
+
+    def _scale_nodes(self, nodes, factor):
+        """Return scaled node coordinates by the given factor."""
+        if factor == 1.0:
+            return nodes
+        return {
+            nid: (xyz[0] * factor, xyz[1] * factor, xyz[2] * factor)
+            for nid, xyz in nodes.items()
+        }
+
+    def _prop_rows(self, props, key):
+        entry = props.get(key, {})
+        return entry.get("rows", [])
+
+    def _value_for_temp(self, rows, temp):
+        exact = [v for t, v in rows if t is not None and abs(t - temp) <= 1e-12]
+        if exact:
+            return exact[-1]
+        consts = [v for t, v in rows if t is None]
+        return consts[-1] if consts else None
+
+    def _temps_from_rows(self, rows):
+        return sorted({t for t, _ in rows if t is not None})
+
+    def _write_template_inp(self, inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info):
+        with open(inp_path, "w") as f:
+            f.write("*NODE\n")
+            for nid in sorted(nodes):
+                x, y, z = nodes[nid]
+                f.write(f"{nid}, {x:.9g}, {y:.9g}, {z:.9g}\n")
+
+            for mid in mat_ids:
+                es = f"eset{mid}"
+                f.write(f"*ELEMENT,TYPE=C3D8I,ELSET={es}\n")
+                for eid, conn in sorted(elems_by_mat.get(mid, []), key=lambda x: x[0]):
+                    f.write(f"{eid}, " + ", ".join(str(n) for n in conn) + "\n")
+
+            eff_mats = []
+            for mid in mat_ids:
+                es = f"eset{mid}"
+                mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
+                if mat.lower().startswith("mat999"):
+                    eff_mats.append((es, mat))
+                else:
+                    f.write(f"*SOLID SECTION, ELSET={es}, MATERIAL={mat}\n")
+
+            if eff_mats:
+                f.write("*Orientation, name=Ori-1\n")
+                f.write("1,0,0,0,1,0\n")
+                f.write("1,0\n")
+                for es, mat in eff_mats:
+                    f.write(f"*SOLID SECTION, ELSET={es}, orientation=Ori-1, MATERIAL={mat}\n")
+
+            required_nsets = [
+                "nset_temperature",
+                "nset_bc_y",
+                "nset_bc_x",
+                "nset_bc_all",
+            ]
+            for ns in required_nsets:
+                f.write(f"*NSET, NSET={ns}\n")
+                ids = nsets.get(ns, [])
+                for k in range(0, len(ids), 16):
+                    f.write(", ".join(str(v) for v in ids[k:k + 16]) + "\n")
+                if not ids:
+                    f.write("** TODO: fill node IDs\n")
+
+            master_eids = nsets.get("master_tie", []) or nsets.get("tie_master", [])
+            slave_eids = nsets.get("slave_tie", []) or nsets.get("tie_slave", [])
+            f.write("*ELSET, ELSET=master_tie\n")
+            for k in range(0, len(master_eids), 16):
+                f.write(", ".join(str(v) for v in master_eids[k:k + 16]) + "\n")
+            if not master_eids:
+                f.write("** TODO: fill element IDs\n")
+            f.write("*ELSET, ELSET=slave_tie\n")
+            for k in range(0, len(slave_eids), 16):
+                f.write(", ".join(str(v) for v in slave_eids[k:k + 16]) + "\n")
+            if not slave_eids:
+                f.write("** TODO: fill element IDs\n")
+            # Abaqus element surface는 ELSET 이름만으로는 부족하고 face ID(S1~S6)가 필요.
+            # tie 면 방향 정보가 없는 템플릿 단계에서는 기본 face(S1)로 작성하고,
+            # set이 비어 있으면 surface 자체를 생략해 경고를 피한다.
+            if master_eids:
+                f.write("*SURFACE, NAME=master_tie, TYPE=ELEMENT\n")
+                f.write("master_tie, S1\n")
+            else:
+                f.write("** NOTE: master_tie surface skipped (empty element set)\n")
+            if slave_eids:
+                f.write("*SURFACE, NAME=slave_tie, TYPE=ELEMENT\n")
+                f.write("slave_tie, S1\n")
+            else:
+                f.write("** NOTE: slave_tie surface skipped (empty element set)\n")
+
+            for mid in mat_ids:
+                mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
+                f.write(f"*MATERIAL, NAME={mat}\n")
+                props = mat_info.get(mid, {}).get("props", {})
+                if mat.lower().startswith("mat999"):
+                    # Orthotropic
+                    f.write("*ELASTIC, TYPE=ENGINEERING CONSTANTS\n")
+                    keys_main = ["ex", "ey", "ez", "nuxy", "nuyz", "nuxz", "gxy", "gyz", "gxz"]
+                    rows_all = []
+                    for k in keys_main:
+                        rows_all.extend(self._prop_rows(props, k))
+                    temps = self._temps_from_rows(rows_all)
+                    if temps:
+                        for t in temps:
+                            vals = [self._value_for_temp(self._prop_rows(props, k), t) for k in keys_main]
+                            if any(v is None for v in vals):
+                                continue
+                            f.write(", ".join(self._fmt_num(v) for v in vals) + f", {self._fmt_num(t)}\n")
+                    else:
+                        vals = [self._value_for_temp(self._prop_rows(props, k), 0.0) for k in keys_main]
+                        if any(v is None for v in vals):
+                            f.write("** TODO: fill engineering constants\n")
+                        else:
+                            f.write(", ".join(self._fmt_num(v) for v in vals) + "\n")
+
+                    f.write("*EXPANSION, TYPE=ORTHOTROPIC\n")
+                    ctex_rows = self._prop_rows(props, "alpx")
+                    ctey_rows = self._prop_rows(props, "alpy")
+                    ctez_rows = self._prop_rows(props, "alpz")
+                    cte_temps = self._temps_from_rows(ctex_rows + ctey_rows + ctez_rows)
+                    if cte_temps:
+                        for t in cte_temps:
+                            vx = self._value_for_temp(ctex_rows, t)
+                            vy = self._value_for_temp(ctey_rows, t)
+                            vz = self._value_for_temp(ctez_rows, t)
+                            if vx is None or vy is None or vz is None:
+                                continue
+                            f.write(f"{self._fmt_num(vx)}, {self._fmt_num(vy)}, {self._fmt_num(vz)}, {self._fmt_num(t)}\n")
+                    else:
+                        vx = self._value_for_temp(ctex_rows, 0.0)
+                        vy = self._value_for_temp(ctey_rows, 0.0)
+                        vz = self._value_for_temp(ctez_rows, 0.0)
+                        if vx is None or vy is None or vz is None:
+                            f.write("** TODO: fill orthotropic CTE\n")
+                        else:
+                            f.write(f"{self._fmt_num(vx)}, {self._fmt_num(vy)}, {self._fmt_num(vz)}\n")
+                else:
+                    # Isotropic
+                    ex_rows = self._prop_rows(props, "ex")
+                    nu_rows = self._prop_rows(props, "nuxy")
+                    alpha_rows = self._prop_rows(props, "alpx")
+
+                    elastic_temps = self._temps_from_rows(ex_rows + nu_rows)
+                    if elastic_temps:
+                        f.write("*ELASTIC\n")
+                        for t in elastic_temps:
+                            ex = self._value_for_temp(ex_rows, t)
+                            nu = self._value_for_temp(nu_rows, t)
+                            if ex is None or nu is None:
+                                continue
+                            f.write(f"{self._fmt_num(ex)}, {self._fmt_num(nu)}, {self._fmt_num(t)}\n")
+                    else:
+                        ex = self._value_for_temp(ex_rows, 0.0)
+                        nu = self._value_for_temp(nu_rows, 0.0)
+                        f.write("*ELASTIC\n")
+                        if ex is None or nu is None:
+                            f.write("** TODO: fill E, nu\n")
+                        else:
+                            f.write(f"{self._fmt_num(ex)}, {self._fmt_num(nu)}\n")
+
+                    exp_temps = self._temps_from_rows(alpha_rows)
+                    f.write("*EXPANSION\n")
+                    if exp_temps:
+                        for t in exp_temps:
+                            a = self._value_for_temp(alpha_rows, t)
+                            if a is not None:
+                                f.write(f"{self._fmt_num(a)}, {self._fmt_num(t)}\n")
+                    else:
+                        a = self._value_for_temp(alpha_rows, 0.0)
+                        if a is None:
+                            f.write("** TODO: fill CTE\n")
+                        else:
+                            f.write(f"{self._fmt_num(a)}\n")
+
+            f.write("*TIE, NAME=tie-1\n")
+            f.write("master_tie, slave_tie\n")
+            f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
+            f.write("NSET_TEMPERATURE,183.0\n")
+            f.write("*STEP, INC=10000, NAME=step, NLGEOM=NO\n")
+            f.write("*STATIC\n")
+            f.write("1.0, 1.0, 1.0e-15, 1.0\n")
+            f.write("*TEMPERATURE, OP=NEW\n")
+            f.write("NSET_TEMPERATURE, 25.0\n")
+            f.write("*BOUNDARY\n")
+            f.write("NSET_BC_Y,XSYMM\n")
+            f.write("NSET_BC_X,YSYMM\n")
+            f.write("NSET_BC_ALL,3,,0\n")
 
 
 if __name__ == "__main__":
