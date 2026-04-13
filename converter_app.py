@@ -20,7 +20,12 @@ class ConverterApp:
         self.node_tol = tk.StringVar(value="1e-6")
         # UNBLOCKED CDWRITE format expands ETBLOCK into classic ET/KEYOPT
         # cards so older HyperMesh versions can read the .cdb. Default on.
+        # NOTE: abaqus fromansys (Step 4) requires BLOCKED nblock/eblock,
+        # so a full Step 4 run forces BLOCKED regardless of this flag.
         self.cdwrite_unblocked = tk.BooleanVar(value=True)
+        # Step 3 text-level CDB cleanup toggle. When disabled, the .cdb
+        # produced by Step 1&2 is passed straight to Step 4.
+        self.cdb_cleanup_enabled = tk.BooleanVar(value=True)
 
         # MAPDL launch settings
         self.mapdl_version = tk.StringVar(value="242")
@@ -56,9 +61,15 @@ class ConverterApp:
 
         tk.Checkbutton(
             frm_set,
-            text="CDWRITE UNBLOCKED (HyperMesh compatible)",
+            text="CDWRITE UNBLOCKED (HyperMesh compatible; auto-disabled for full Step 4 run)",
             variable=self.cdwrite_unblocked,
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 0))
+
+        tk.Checkbutton(
+            frm_set,
+            text="Run Step 3 CDB text cleanup",
+            variable=self.cdb_cleanup_enabled,
+        ).grid(row=2, column=0, columnspan=4, sticky="w")
 
         # --- MAPDL Launch Settings ---
         frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
@@ -204,7 +215,11 @@ class ConverterApp:
                 self._log("\n=== Stopped after Step 1&2 ===")
                 return
 
-            cdb_path = self._step3_clean_cdb()
+            if self.cdb_cleanup_enabled.get():
+                cdb_path = self._step3_clean_cdb()
+            else:
+                self._log("\n=== Step 3: CDB text cleanup DISABLED ===")
+                cdb_path = os.path.join(self.output_dir.get(), "clean_model.cdb")
             if "Step 3" in until:
                 self._log("\n=== Stopped after Step 3 ===")
                 return
@@ -299,10 +314,19 @@ class ConverterApp:
 
             # --- Step 2b: CDWRITE ---
             # UNBLOCKED emits ET/KEYOPT as individual cards so HyperMesh
-            # can read them (default). Unchecking the option falls back
-            # to the default BLOCKED format used by ANSYS 2023 R1+.
+            # can read them (default). `abaqus fromansys` however rejects
+            # UNBLOCKED with "missing nblock and/or eblock data", so a
+            # full Step 4 run is always forced BLOCKED regardless of the
+            # user's checkbox.
             cdb_name = "clean_model"
-            use_unblocked = bool(self.cdwrite_unblocked.get())
+            is_full_run = "Step 4" in self.run_until.get()
+            user_wants_unblocked = bool(self.cdwrite_unblocked.get())
+            use_unblocked = user_wants_unblocked and not is_full_run
+            if user_wants_unblocked and is_full_run:
+                self._log(
+                    "  (UNBLOCKED requested, but full Step 4 run requires "
+                    "BLOCKED for abaqus fromansys — overriding.)"
+                )
             fmat = "UNBLOCKED" if use_unblocked else ""
             self._log(
                 f"Writing {cdb_name}.cdb "
