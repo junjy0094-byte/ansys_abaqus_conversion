@@ -291,7 +291,7 @@ class ConverterApp:
             # --- Step 2b: CDWRITE ---
             cdb_name = "clean_model"
             self._log(f"Writing {cdb_name}.cdb ...")
-            mapdl.cdwrite("ALL", cdb_name, "cdb")
+            mapdl.cdwrite("DB", cdb_name, "cdb")
             self._log("CDWRITE complete.")
 
         finally:
