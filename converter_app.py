@@ -354,9 +354,104 @@ class ConverterApp:
                         f"classic format (abaqus fromansys compatible)."
                     )
 
+            # Step 4 텍스트 INP 생성을 위해 nset/material 메타데이터 저장
+            self._export_step1_metadata(mapdl, out_dir)
+
         finally:
             mapdl.exit()
             self._log("MAPDL closed.")
+
+    def _export_step1_metadata(self, mapdl, out_dir):
+        """Save nset/material metadata from MAPDL to text files."""
+        nset_path = os.path.join(out_dir, "step1_nsets.txt")
+        mplist_path = os.path.join(out_dir, "step1_mplist.txt")
+
+        nset_data = self._collect_nset_data(mapdl)
+        with open(nset_path, "w") as f:
+            for name, ids in nset_data.items():
+                f.write(f"[{name}]\n")
+                for i in range(0, len(ids), 16):
+                    f.write(", ".join(str(v) for v in ids[i:i + 16]) + "\n")
+                f.write("\n")
+        self._log(f"Saved nset metadata: {nset_path}")
+
+        self._dump_mapdl_mplist(mapdl, mplist_path)
+        self._log(f"Saved material metadata: {mplist_path}")
+
+    def _dump_mapdl_mplist(self, mapdl, mplist_path):
+        macro_path = os.path.join(mapdl.directory, "_dump_mplist_for_step4.mac")
+        with open(macro_path, "w") as f:
+            f.write("/OUTPUT,_mplist_step4,txt\n")
+            f.write("MPLIST,ALL\n")
+            f.write("/OUTPUT\n")
+        mapdl.input(macro_path)
+        src = os.path.join(mapdl.directory, "_mplist_step4.txt")
+        try:
+            shutil.copy2(src, mplist_path)
+        except Exception:
+            with open(mplist_path, "w") as f:
+                f.write("")
+
+    def _collect_nset_data(self, mapdl):
+        """Collect required nset lists directly from node coordinates/components."""
+        mapdl.allsel("ALL")
+        nnum = [int(v) for v in mapdl.mesh.nnum.tolist()]
+        coords = mapdl.mesh.nodes
+        node_xyz = {
+            int(nid): (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+            for nid, xyz in zip(nnum, coords)
+        }
+        tol = 1.0e-12
+        min_x = min(v[0] for v in node_xyz.values())
+        min_y = min(v[1] for v in node_xyz.values())
+        min_z = min(v[2] for v in node_xyz.values())
+
+        bc_x = sorted(nid for nid, (x, _, _) in node_xyz.items() if abs(x - min_x) <= tol)
+        bc_y = sorted(nid for nid, (_, y, _) in node_xyz.items() if abs(y - min_y) <= tol)
+
+        xyz_candidates = [
+            nid for nid, (x, y, z) in node_xyz.items()
+            if abs(x - min_x) <= tol and abs(y - min_y) <= tol and abs(z - min_z) <= tol
+        ]
+        if xyz_candidates:
+            bc_all = [min(xyz_candidates)]
+        else:
+            # 완전 일치 노드가 없으면 최소점에 가장 가까운 노드 1개 선택
+            best = min(
+                node_xyz.items(),
+                key=lambda kv: abs(kv[1][0] - min_x) + abs(kv[1][1] - min_y) + abs(kv[1][2] - min_z),
+            )[0]
+            bc_all = [best]
+
+        master = self._get_component_node_ids(mapdl, ["MASTER_TIE", "TIE_MASTER", "master_tie"])
+        slave = self._get_component_node_ids(mapdl, ["SLAVE_TIE", "TIE_SLAVE", "slave_tie"])
+        mapdl.allsel("ALL")
+
+        return {
+            "nset_temperature": sorted(nnum),
+            "nset_bc_x": bc_x,
+            "nset_bc_y": bc_y,
+            "nset_bc_all": bc_all,
+            "master_tie": master,
+            "slave_tie": slave,
+        }
+
+    def _get_component_node_ids(self, mapdl, candidates):
+        existing = {name.upper(): name for name in self._list_all_components(mapdl)}
+        target = None
+        for c in candidates:
+            if c.upper() in existing:
+                target = existing[c.upper()]
+                break
+        if not target:
+            return []
+        try:
+            mapdl.allsel("ALL")
+            mapdl.cmsel("S", target, "NODE")
+            ids = [int(v) for v in mapdl.mesh.nnum.tolist()]
+            return sorted(set(ids))
+        except Exception:
+            return []
 
     def _handle_ties_and_loads(self, mapdl):
         """Detect tie conditions defined via constraint equations (CE/CEINTF).
@@ -962,15 +1057,18 @@ class ConverterApp:
 
         nodes = self._parse_cdb_nodes(cdb_path)
         elems_by_mat = self._parse_cdb_elements_by_mat(cdb_path)
-        nsets = self._parse_cdb_nsets(cdb_path)
-        mat_ids = sorted(elems_by_mat.keys())
+        nset_txt = os.path.join(out_dir, "step1_nsets.txt")
+        mplist_txt = os.path.join(out_dir, "step1_mplist.txt")
+        nsets = self._read_nsets_txt(nset_txt) if os.path.exists(nset_txt) else self._parse_cdb_nsets(cdb_path)
+        mat_info = self._read_materials_from_mplist_txt(mplist_txt) if os.path.exists(mplist_txt) else {}
+        mat_ids = sorted(mat_info.keys()) if mat_info else sorted(elems_by_mat.keys())
 
         if not nodes:
             raise RuntimeError("NBLOCK에서 노드를 읽지 못했습니다.")
         if not elems_by_mat:
             raise RuntimeError("EBLOCK에서 요소를 읽지 못했습니다.")
 
-        self._write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets)
+        self._write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info)
         self._log(f"INP created: {inp_path}")
         self._log(
             "NOTE: 재료 상세(온도의존/ENG CONSTANTS/CTE)는 템플릿 자리만 생성됩니다. "
@@ -1105,7 +1203,44 @@ class ConverterApp:
                 nsets[name.lower()] = sorted(set(node_ids))
         return nsets
 
-    def _write_template_inp(self, inp_path, nodes, elems_by_mat, mat_ids, nsets):
+    def _read_nsets_txt(self, nset_path):
+        nsets = {}
+        cur = None
+        with open(nset_path, "r") as f:
+            for raw in f:
+                s = raw.strip()
+                if not s:
+                    continue
+                if s.startswith("[") and s.endswith("]"):
+                    cur = s[1:-1].strip().lower()
+                    nsets[cur] = []
+                    continue
+                if cur is None:
+                    continue
+                for tok in s.split(","):
+                    tok = tok.strip()
+                    if tok.isdigit():
+                        nsets[cur].append(int(tok))
+        for k in list(nsets.keys()):
+            nsets[k] = sorted(set(nsets[k]))
+        return nsets
+
+    def _read_materials_from_mplist_txt(self, mplist_path):
+        """Return {mat_id: {'name': 'matxxx', 'raw_lines': [...]}} from MPLIST txt."""
+        mats = {}
+        cur_id = None
+        with open(mplist_path, "r") as f:
+            for raw in f:
+                m = re.search(r"MATERIAL\s+NUMBER\s*=?\s*(\d+)", raw, re.IGNORECASE)
+                if m:
+                    cur_id = int(m.group(1))
+                    mats[cur_id] = {"name": f"mat{cur_id}", "raw_lines": []}
+                    continue
+                if cur_id is not None:
+                    mats[cur_id]["raw_lines"].append(raw.rstrip("\n"))
+        return mats
+
+    def _write_template_inp(self, inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info):
         with open(inp_path, "w") as f:
             f.write("*NODE\n")
             for nid in sorted(nodes):
@@ -1115,14 +1250,14 @@ class ConverterApp:
             for mid in mat_ids:
                 es = f"eset{mid}"
                 f.write(f"*ELEMENT,TYPE=C3D8I,ELSET={es}\n")
-                for eid, conn in sorted(elems_by_mat[mid], key=lambda x: x[0]):
+                for eid, conn in sorted(elems_by_mat.get(mid, []), key=lambda x: x[0]):
                     f.write(f"{eid}, " + ", ".join(str(n) for n in conn) + "\n")
 
             eff_mats = []
             for mid in mat_ids:
                 es = f"eset{mid}"
-                mat = f"mat{mid}"
-                if mat.upper().startswith("EFF"):
+                mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
+                if mat.lower().startswith("mat999"):
                     eff_mats.append((es, mat))
                 else:
                     f.write(f"*SOLID SECTION, ELSET={es}, MATERIAL={mat}\n")
@@ -1156,8 +1291,12 @@ class ConverterApp:
             f.write("slave_tie\n")
 
             for mid in mat_ids:
-                mat = f"mat{mid}"
+                mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
                 f.write(f"*MATERIAL, NAME={mat}\n")
+                raw_lines = mat_info.get(mid, {}).get("raw_lines", [])
+                for ln in raw_lines[:20]:
+                    if ln.strip():
+                        f.write(f"** MPLIST: {ln}\n")
                 f.write("** TODO: choose one of below blocks\n")
                 f.write("** 1) Isotropic at room temperature\n")
                 f.write("*ELASTIC\n")
@@ -1169,7 +1308,7 @@ class ConverterApp:
                 f.write("** E, nu, T1\n")
                 f.write("** *EXPANSION\n")
                 f.write("** CTE, T1\n")
-                if mat.upper().startswith("EFF"):
+                if mat.lower().startswith("mat999"):
                     f.write("*ELASTIC, TYPE=ENGINEERING CONSTANTS\n")
                     f.write("** Ex, Ey, Ez, vxy, vyz, vxz, Gxy, Gyz, Gxz, T\n")
                     f.write("*EXPANSION, TYPE=ORTHOTROPIC\n")
