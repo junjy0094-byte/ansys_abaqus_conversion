@@ -309,7 +309,13 @@ class ConverterApp:
             self._export_step1_metadata(mapdl, out_dir)
 
         finally:
-            mapdl.exit()
+            try:
+                mapdl.exit()
+            except Exception:
+                try:
+                    mapdl.exit(force=True)
+                except Exception as e:
+                    self._log(f"MAPDL exit warning: {e}")
             self._log("MAPDL closed.")
 
     def _export_step1_metadata(self, mapdl, out_dir):
@@ -398,7 +404,22 @@ class ConverterApp:
         if not target:
             return []
         try:
-            # 1) NODE component로 보고 ESLN,S로 element 확장
+            ctype = self._get_component_type(mapdl, target)
+            if ctype in {"ELEM", "ELEMENT"}:
+                mapdl.allsel("ALL")
+                mapdl.cmsel("S", target, "ELEM")
+                eids = [int(v) for v in mapdl.mesh.enum.tolist()]
+                return sorted(set(eids))
+            if ctype == "NODE":
+                mapdl.allsel("ALL")
+                mapdl.cmsel("S", target, "NODE")
+                try:
+                    mapdl.esln("S")
+                except Exception:
+                    pass
+                eids = [int(v) for v in mapdl.mesh.enum.tolist()]
+                return sorted(set(eids))
+            # Unknown 타입 fallback: NODE->ESLN 후 ELEM direct 순서로 시도
             mapdl.allsel("ALL")
             mapdl.cmsel("S", target, "NODE")
             try:
@@ -408,19 +429,39 @@ class ConverterApp:
             eids = [int(v) for v in mapdl.mesh.enum.tolist()]
             if eids:
                 return sorted(set(eids))
-            # 2) ELEM component 직접 선택
             mapdl.allsel("ALL")
             mapdl.cmsel("S", target, "ELEM")
             eids = [int(v) for v in mapdl.mesh.enum.tolist()]
             if eids:
                 return sorted(set(eids))
-            # 3) generic 선택 fallback
             mapdl.allsel("ALL")
             mapdl.cmsel("S", target)
             eids = [int(v) for v in mapdl.mesh.enum.tolist()]
             return sorted(set(eids))
         except Exception:
             return []
+
+    def _get_component_type(self, mapdl, target_name):
+        """Return component entity type from CMLIST output (NODE/ELEM/...)."""
+        macro_path = os.path.join(mapdl.directory, "_dump_cmlist_type.mac")
+        try:
+            with open(macro_path, "w") as f:
+                f.write("/OUTPUT,_cmlist_type,txt\n")
+                f.write("CMLIST\n")
+                f.write("/OUTPUT\n")
+            mapdl.input(macro_path)
+        except Exception:
+            return None
+        cmlist_path = os.path.join(mapdl.directory, "_cmlist_type.txt")
+        try:
+            with open(cmlist_path, "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].upper() == target_name.upper():
+                        return parts[1].upper()
+        except FileNotFoundError:
+            return None
+        return None
 
     def _get_component_node_ids(self, mapdl, candidates):
         existing = {name.upper(): name for name in self._list_all_components(mapdl)}
