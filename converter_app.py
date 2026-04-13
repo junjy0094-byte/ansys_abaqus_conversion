@@ -380,8 +380,13 @@ class ConverterApp:
             )[0]
             bc_all = [best]
 
-        master = self._get_component_element_ids(mapdl, ["TIE_MASTER", "tie_master", "MASTER_TIE", "master_tie"])
-        slave = self._get_component_element_ids(mapdl, ["TIE_SLAVE", "tie_slave", "SLAVE_TIE", "slave_tie"])
+        master = self._get_component_element_ids(
+            mapdl, ["TIE_MASTER", "tie_master", "TIE_MAST", "MASTER_TIE", "master_tie", "MASTER_T"]
+        )
+        slave = self._get_component_element_ids(
+            mapdl, ["TIE_SLAVE", "tie_slave", "TIE_SLAV", "SLAVE_TIE", "slave_tie", "SLAVE_TI"]
+        )
+        self._log(f"  tie element sets: master={len(master)} slave={len(slave)}")
         mapdl.allsel("ALL")
 
         return {
@@ -523,10 +528,10 @@ class ConverterApp:
         # CELIST 파싱 실패 시 기존 컴포넌트명에서 fallback
         if not slave_nodes and not master_nodes:
             existing = [n.upper() for n in self._list_all_components(mapdl)]
-            if "TIE_SLAVE" in existing or "SLAVE_TIE" in existing:
-                slave_nodes.update(self._get_component_node_ids(mapdl, ["TIE_SLAVE", "SLAVE_TIE", "tie_slave"]))
-            if "TIE_MASTER" in existing or "MASTER_TIE" in existing:
-                master_nodes.update(self._get_component_node_ids(mapdl, ["TIE_MASTER", "MASTER_TIE", "tie_master"]))
+            if any(name in existing for name in ("TIE_SLAVE", "SLAVE_TIE", "TIE_SLAV", "SLAVE_TI")):
+                slave_nodes.update(self._get_component_node_ids(mapdl, ["TIE_SLAVE", "SLAVE_TIE", "TIE_SLAV", "SLAVE_TI", "tie_slave"]))
+            if any(name in existing for name in ("TIE_MASTER", "MASTER_TIE", "TIE_MAST", "MASTER_T")):
+                master_nodes.update(self._get_component_node_ids(mapdl, ["TIE_MASTER", "MASTER_TIE", "TIE_MAST", "MASTER_T", "tie_master"]))
             if slave_nodes or master_nodes:
                 self._log("  Fallback: reused existing TIE_MASTER/TIE_SLAVE components.")
 
