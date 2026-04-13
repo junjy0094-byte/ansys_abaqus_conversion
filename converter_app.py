@@ -289,9 +289,19 @@ class ConverterApp:
             self._log(f"{db_name}.db saved.")
 
             # --- Step 2b: CDWRITE ---
+            # Full pipeline (Step 4) keeps the default BLOCKED format for
+            # speed/size. When stopping early for HyperMesh debugging
+            # (Step 1&2 or Step 3), write UNBLOCKED so ET/KEYOPT are
+            # emitted as individual cards instead of an ETBLOCK block
+            # that older HyperMesh versions do not parse.
             cdb_name = "clean_model"
-            self._log(f"Writing {cdb_name}.cdb ...")
-            mapdl.cdwrite("DB", cdb_name, "cdb", fmat="UNBLOCKED")
+            is_full_run = "Step 4" in self.run_until.get()
+            fmat = "" if is_full_run else "UNBLOCKED"
+            self._log(
+                f"Writing {cdb_name}.cdb "
+                f"({'BLOCKED' if is_full_run else 'UNBLOCKED'} format) ..."
+            )
+            mapdl.cdwrite("DB", cdb_name, "cdb", fmat=fmat)
             self._log("CDWRITE complete.")
 
         finally:
