@@ -1139,6 +1139,10 @@ class ConverterApp:
         if not elems_by_mat:
             raise RuntimeError("EBLOCK에서 요소를 읽지 못했습니다.")
 
+        # Abaqus 입력 전 길이 스케일 보정 (x1000)
+        nodes = self._scale_nodes(nodes, 1000.0)
+        self._log("Applied coordinate scale-up: x1000")
+
         self._write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info)
         self._log(f"INP created: {inp_path}")
         self._log(
@@ -1370,6 +1374,15 @@ class ConverterApp:
         if isinstance(v, (int, float)):
             return f"{v:.9g}"
         return str(v)
+
+    def _scale_nodes(self, nodes, factor):
+        """Return scaled node coordinates by the given factor."""
+        if factor == 1.0:
+            return nodes
+        return {
+            nid: (xyz[0] * factor, xyz[1] * factor, xyz[2] * factor)
+            for nid, xyz in nodes.items()
+        }
 
     def _prop_rows(self, props, key):
         entry = props.get(key, {})
