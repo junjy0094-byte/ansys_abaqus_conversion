@@ -800,11 +800,24 @@ class ConverterApp:
                         out_lines.append(lines[i])
                         i += 1
                         continue
-                    out_lines.append(f"ET,{itype},{ename}\n")
-                    for slot, kop in enumerate(keyopts, start=1):
+                    # ET accepts the element name plus up to 6 positional
+                    # keyopts (KOP1..KOP6). Inline those so downstream
+                    # tools like `abaqus fromansys` that do not recognise
+                    # the standalone KEYOPT command still see them. Only
+                    # the rarely-used keyopts 7..18 remain as separate
+                    # KEYOPT lines.
+                    inline_kops = keyopts[:6]
+                    while inline_kops and inline_kops[-1] == 0:
+                        inline_kops.pop()
+                    et_line = f"ET,{itype},{ename}"
+                    if inline_kops:
+                        et_line += "," + ",".join(str(k) for k in inline_kops)
+                    out_lines.append(et_line + "\n")
+                    for extra_idx in range(6, len(keyopts)):
+                        kop = keyopts[extra_idx]
                         if kop != 0:
                             out_lines.append(
-                                f"KEYOPT,{itype},{slot},{kop}\n"
+                                f"KEYOPT,{itype},{extra_idx + 1},{kop}\n"
                             )
                     expanded += 1
                     i += 1
