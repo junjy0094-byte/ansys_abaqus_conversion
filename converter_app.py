@@ -283,7 +283,9 @@ class ConverterApp:
 
         mapdl.allsel("ALL")
 
-        # ── 3) 보존 대상(TIE_SLAVE/TIE_MASTER)을 제외한 나머지 CM 모두 삭제 ──
+        # ── 3) 보존 대상(TIE_SLAVE/TIE_MASTER)을 제외한 나머지 CM 네이밍 삭제 ──
+        # CMDELE은 컴포넌트 "이름(별칭)"만 제거하며, 묶여 있던 노드/요소
+        # 자체는 그대로 두기 때문에 모델 구조에는 영향이 없다.
         existing_cms = self._list_all_components(mapdl)
         deleted_cm = 0
         for name in existing_cms:
@@ -294,34 +296,32 @@ class ConverterApp:
                 deleted_cm += 1
             except Exception:
                 pass
-        self._log(f"  Deleted {deleted_cm} non-tie component(s).")
+        self._log(f"  Removed {deleted_cm} non-tie component name(s).")
 
-        # ── 4) 모든 제약방정식(CE) 삭제 ──
-        try:
-            mapdl.cedele("ALL")
-            self._log("  Deleted all constraint equations (CEDELE,ALL).")
-        except Exception as e:
-            self._log(f"  Warning: CEDELE failed: {e}")
-
-        # ── 5) 모든 하중/경계조건 삭제 ──
+        # ── 4) 모든 하중/구속/제약방정식/커플 세트 삭제 ──
+        # FDELE/DDELE/SF*DELE/BF*DELE 로 모든 하중·경계조건을,
+        # CEDELE 로 제약방정식(CEINTF 결과 포함)을,
+        # CPDELE 로 모든 coupled DOF set을 일괄 정리한다.
         load_cmds = [
-            ("fdele", ("ALL", "ALL")),         # nodal forces
-            ("ddele", ("ALL", "ALL")),         # nodal DOF constraints
+            ("fdele", ("ALL", "ALL")),           # nodal forces
+            ("ddele", ("ALL", "ALL")),           # nodal DOF constraints
             ("sfedele", ("ALL", "ALL", "ALL")),  # element surface loads
-            ("sfdele", ("ALL", "ALL")),        # nodal surface loads
-            ("bfdele", ("ALL", "ALL")),        # nodal body forces
+            ("sfdele", ("ALL", "ALL")),          # nodal surface loads
+            ("bfdele", ("ALL", "ALL")),          # nodal body forces
             ("bfedele", ("ALL", "ALL", "ALL")),  # element body forces
+            ("cedele", ("ALL",)),                # constraint equations
+            ("cpdele", ("ALL",)),                # coupled DOF sets
         ]
         for cmd_name, args in load_cmds:
             try:
                 getattr(mapdl, cmd_name)(*args)
             except Exception:
                 pass
-        self._log("  Deleted all applied loads/BCs.")
+        self._log("  Deleted all loads / constraint equations / coupled sets.")
 
-        # ── 6) 모든 TABLE 파라미터 삭제 ──
-        n_tables = self._delete_all_tables(mapdl)
-        self._log(f"  Deleted {n_tables} table parameter(s).")
+        # ── 5) 저장된 ARRAY/TABLE 파라미터 모두 삭제 ──
+        n_arrays = self._delete_array_params(mapdl)
+        self._log(f"  Deleted {n_arrays} array/table parameter(s).")
 
     def _parse_celist(self, mapdl):
         """Dump CELIST to a text file and parse it.
@@ -394,12 +394,14 @@ class ConverterApp:
 
         return equations
 
-    def _delete_all_tables(self, mapdl):
-        """Delete every TABLE-type parameter in the current MAPDL session.
+    def _delete_array_params(self, mapdl):
+        """Delete every stored ARRAY or TABLE parameter in the session.
 
-        Dumps `*STATUS,_PRM` to a text file, parses out parameter rows whose
-        type column is TABLE, and `*DEL`s each one. Underscore-prefixed
-        parameters are skipped because they belong to PyMAPDL internals."""
+        The user treats "tables" as any stored array (both ARRAY and TABLE
+        kinds defined via *DIM). We dump `*STATUS,_PRM` to a text file,
+        parse out parameter rows whose type column is ARRAY or TABLE, and
+        `*DEL` each one. Underscore-prefixed parameters are skipped
+        because they belong to PyMAPDL internals."""
         macro_path = os.path.join(mapdl.directory, "_dump_params.mac")
         try:
             with open(macro_path, "w") as f:
@@ -411,8 +413,9 @@ class ConverterApp:
             return 0
 
         params_path = os.path.join(mapdl.directory, "_params.txt")
-        table_names = []
+        target_names = []
         ident_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+        target_types = {"ARRAY", "TABLE"}
         try:
             with open(params_path, "r") as f:
                 for line in f:
@@ -424,13 +427,13 @@ class ConverterApp:
                         continue
                     if name.startswith("_"):
                         continue
-                    if any(p.upper() == "TABLE" for p in parts[1:]):
-                        table_names.append(name)
+                    if any(p.upper() in target_types for p in parts[1:]):
+                        target_names.append(name)
         except FileNotFoundError:
             return 0
 
         deleted = 0
-        for name in table_names:
+        for name in target_names:
             try:
                 mapdl.run(f"*DEL,{name},,NOPR")
                 deleted += 1
