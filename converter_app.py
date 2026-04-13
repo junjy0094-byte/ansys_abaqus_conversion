@@ -377,8 +377,8 @@ class ConverterApp:
             )[0]
             bc_all = [best]
 
-        master = self._get_component_node_ids(mapdl, ["TIE_MASTER", "tie_master", "MASTER_TIE", "master_tie"])
-        slave = self._get_component_node_ids(mapdl, ["TIE_SLAVE", "tie_slave", "SLAVE_TIE", "slave_tie"])
+        master = self._get_component_element_ids(mapdl, ["TIE_MASTER", "tie_master", "MASTER_TIE", "master_tie"])
+        slave = self._get_component_element_ids(mapdl, ["TIE_SLAVE", "tie_slave", "SLAVE_TIE", "slave_tie"])
         mapdl.allsel("ALL")
 
         return {
@@ -386,9 +386,44 @@ class ConverterApp:
             "nset_bc_x": bc_x,
             "nset_bc_y": bc_y,
             "nset_bc_all": bc_all,
+            # tie 계열은 node-set이 아니라 element-set으로 사용
             "master_tie": master,
             "slave_tie": slave,
         }
+
+    def _get_component_element_ids(self, mapdl, candidates):
+        existing = {name.upper(): name for name in self._list_all_components(mapdl)}
+        target = None
+        for c in candidates:
+            if c.upper() in existing:
+                target = existing[c.upper()]
+                break
+        if not target:
+            return []
+        try:
+            # 1) NODE component로 보고 ESLN,S로 element 확장
+            mapdl.allsel("ALL")
+            mapdl.cmsel("S", target, "NODE")
+            try:
+                mapdl.esln("S")
+            except Exception:
+                pass
+            eids = [int(v) for v in mapdl.mesh.enum.tolist()]
+            if eids:
+                return sorted(set(eids))
+            # 2) ELEM component 직접 선택
+            mapdl.allsel("ALL")
+            mapdl.cmsel("S", target, "ELEM")
+            eids = [int(v) for v in mapdl.mesh.enum.tolist()]
+            if eids:
+                return sorted(set(eids))
+            # 3) generic 선택 fallback
+            mapdl.allsel("ALL")
+            mapdl.cmsel("S", target)
+            eids = [int(v) for v in mapdl.mesh.enum.tolist()]
+            return sorted(set(eids))
+        except Exception:
+            return []
 
     def _get_component_node_ids(self, mapdl, candidates):
         existing = {name.upper(): name for name in self._list_all_components(mapdl)}
@@ -1264,28 +1299,30 @@ class ConverterApp:
                 "nset_bc_y",
                 "nset_bc_x",
                 "nset_bc_all",
-                "master_tie",
-                "slave_tie",
             ]
             for ns in required_nsets:
                 f.write(f"*NSET, NSET={ns}\n")
                 ids = nsets.get(ns, [])
-                if not ids:
-                    alias_map = {
-                        "master_tie": "tie_master",
-                        "slave_tie": "tie_slave",
-                    }
-                    alias = alias_map.get(ns)
-                    if alias:
-                        ids = nsets.get(alias, [])
                 for k in range(0, len(ids), 16):
                     f.write(", ".join(str(v) for v in ids[k:k + 16]) + "\n")
                 if not ids:
                     f.write("** TODO: fill node IDs\n")
 
-            f.write("*SURFACE, NAME=master_tie, TYPE=NODE\n")
+            master_eids = nsets.get("master_tie", []) or nsets.get("tie_master", [])
+            slave_eids = nsets.get("slave_tie", []) or nsets.get("tie_slave", [])
+            f.write("*ELSET, ELSET=master_tie\n")
+            for k in range(0, len(master_eids), 16):
+                f.write(", ".join(str(v) for v in master_eids[k:k + 16]) + "\n")
+            if not master_eids:
+                f.write("** TODO: fill element IDs\n")
+            f.write("*ELSET, ELSET=slave_tie\n")
+            for k in range(0, len(slave_eids), 16):
+                f.write(", ".join(str(v) for v in slave_eids[k:k + 16]) + "\n")
+            if not slave_eids:
+                f.write("** TODO: fill element IDs\n")
+            f.write("*SURFACE, NAME=master_tie, TYPE=ELEMENT\n")
             f.write("master_tie\n")
-            f.write("*SURFACE, NAME=slave_tie, TYPE=NODE\n")
+            f.write("*SURFACE, NAME=slave_tie, TYPE=ELEMENT\n")
             f.write("slave_tie\n")
 
             for mid in mat_ids:
