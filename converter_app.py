@@ -18,6 +18,14 @@ class ConverterApp:
         self.output_dir = tk.StringVar()
         self.abaqus_cmd = tk.StringVar(value="abaqus")
         self.node_tol = tk.StringVar(value="1e-6")
+        # UNBLOCKED CDWRITE format expands ETBLOCK into classic ET/KEYOPT
+        # cards so older HyperMesh versions can read the .cdb. Default on.
+        # NOTE: abaqus fromansys (Step 4) requires BLOCKED nblock/eblock,
+        # so a full Step 4 run forces BLOCKED regardless of this flag.
+        self.cdwrite_unblocked = tk.BooleanVar(value=True)
+        # Step 3 text-level CDB cleanup toggle. When disabled, the .cdb
+        # produced by Step 1&2 is passed straight to Step 4.
+        self.cdb_cleanup_enabled = tk.BooleanVar(value=True)
 
         # MAPDL launch settings
         self.mapdl_version = tk.StringVar(value="242")
@@ -50,6 +58,18 @@ class ConverterApp:
 
         tk.Label(frm_set, text="Node Merge Tol:").grid(row=0, column=2, sticky="w", padx=(20, 0))
         tk.Entry(frm_set, textvariable=self.node_tol, width=12).grid(row=0, column=3, sticky="w", padx=5)
+
+        tk.Checkbutton(
+            frm_set,
+            text="CDWRITE UNBLOCKED (HyperMesh compatible; auto-disabled for full Step 4 run)",
+            variable=self.cdwrite_unblocked,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 0))
+
+        tk.Checkbutton(
+            frm_set,
+            text="Run Step 3 CDB text cleanup",
+            variable=self.cdb_cleanup_enabled,
+        ).grid(row=2, column=0, columnspan=4, sticky="w")
 
         # --- MAPDL Launch Settings ---
         frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
@@ -195,7 +215,11 @@ class ConverterApp:
                 self._log("\n=== Stopped after Step 1&2 ===")
                 return
 
-            cdb_path = self._step3_clean_cdb()
+            if self.cdb_cleanup_enabled.get():
+                cdb_path = self._step3_clean_cdb()
+            else:
+                self._log("\n=== Step 3: CDB text cleanup DISABLED ===")
+                cdb_path = os.path.join(self.output_dir.get(), "clean_model.cdb")
             if "Step 3" in until:
                 self._log("\n=== Stopped after Step 3 ===")
                 return
@@ -289,10 +313,46 @@ class ConverterApp:
             self._log(f"{db_name}.db saved.")
 
             # --- Step 2b: CDWRITE ---
+            # UNBLOCKED emits ET/KEYOPT as individual cards so HyperMesh
+            # can read them (default). `abaqus fromansys` however rejects
+            # UNBLOCKED with "missing nblock and/or eblock data", so a
+            # full Step 4 run is always forced BLOCKED regardless of the
+            # user's checkbox.
             cdb_name = "clean_model"
-            self._log(f"Writing {cdb_name}.cdb ...")
-            mapdl.cdwrite("DB", cdb_name, "cdb")
+            is_full_run = "Step 4" in self.run_until.get()
+            user_wants_unblocked = bool(self.cdwrite_unblocked.get())
+            use_unblocked = user_wants_unblocked and not is_full_run
+            if user_wants_unblocked and is_full_run:
+                self._log(
+                    "  (UNBLOCKED requested, but full Step 4 run requires "
+                    "BLOCKED for abaqus fromansys — overriding.)"
+                )
+            fmat = "UNBLOCKED" if use_unblocked else ""
+            self._log(
+                f"Writing {cdb_name}.cdb "
+                f"({'UNBLOCKED' if use_unblocked else 'BLOCKED'} format) ..."
+            )
+            mapdl.cdwrite("DB", cdb_name, "cdb", fmat=fmat)
             self._log("CDWRITE complete.")
+
+            # When BLOCKED, the file contains ETBLOCK which `abaqus
+            # fromansys` and older HyperMesh versions do not recognise.
+            # Rewrite only the ETBLOCK section as classic ET/KEYOPT
+            # commands; NBLOCK/EBLOCK stay intact so fromansys still
+            # sees node/element data.
+            if not use_unblocked:
+                cdb_path = os.path.join(out_dir, f"{cdb_name}.cdb")
+                expanded = self._expand_etblock(cdb_path)
+                if expanded:
+                    self._log(
+                        f"  Expanded ETBLOCK -> {expanded} ET/KEYOPT card(s)."
+                    )
+                rewritten = self._rewrite_mp_mpdata_to_classic(cdb_path)
+                if rewritten:
+                    self._log(
+                        f"  Rewrote {rewritten} MP/MPDATA line(s) to "
+                        f"classic format (abaqus fromansys compatible)."
+                    )
 
         finally:
             mapdl.exit()
@@ -379,14 +439,6 @@ class ConverterApp:
         # ── 5) 저장된 ARRAY/TABLE 파라미터 모두 삭제 ──
         n_arrays = self._delete_array_params(mapdl)
         self._log(f"  Deleted {n_arrays} array/table parameter(s).")
-
-        # ── 6) 남은 사용자 정의 파라미터 일괄 삭제 (*DEL,ALL) ──
-        # KABS=0 이므로 _XXX 형태의 PyMAPDL 내부 파라미터는 보존된다.
-        try:
-            mapdl.run("*DEL,ALL")
-            self._log("  Issued *DEL,ALL (cleared user parameters).")
-        except Exception as e:
-            self._log(f"  Warning: *DEL,ALL failed: {e}")
 
     def _parse_celist(self, mapdl):
         """Dump CELIST to a text file and parse it.
@@ -683,6 +735,214 @@ class ConverterApp:
 
         self._log(f"Removed {removed_count} block(s). Saved: {dst}")
         return dst
+
+    def _expand_etblock(self, cdb_path):
+        """Replace every ETBLOCK block in a .cdb with ET/KEYOPT cards.
+
+        The ETBLOCK command was introduced in Ansys 2023 R1 as a compact
+        replacement for sequences of ET + KEYOPT commands. Tools that
+        still parse the classic CDB dialect (notably `abaqus fromansys`
+        and older HyperMesh versions) reject it with messages like
+        "unrecognized keyword = ETBLOCK" or "found 0 entries in ET data".
+
+        The block format emitted by MAPDL is:
+
+            ETBLOCK,<numhead>,<maxkyo>
+            (i9,19a9)
+                    1      186        0        0 ...
+                    2      174        0        0 ...
+                   -1
+
+        Each data row is: itype, ename, kop1, kop2, ..., kop18 (trailing
+        zero fields may be truncated). We rewrite the block as:
+
+            ET,<itype>,<ename>
+            KEYOPT,<itype>,<n>,<value>     (only for non-zero keyopts)
+
+        The file is rewritten in place. Returns the number of expanded
+        element-type rows, or 0 if no ETBLOCK section was found.
+        """
+        try:
+            with open(cdb_path, "r") as f:
+                lines = f.readlines()
+        except (FileNotFoundError, OSError):
+            return 0
+
+        out_lines = []
+        expanded = 0
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            if line.lstrip().upper().startswith("ETBLOCK"):
+                # Skip the ETBLOCK header and its (i9,19a9)-style format line.
+                i += 1
+                if i < n and lines[i].lstrip().startswith("("):
+                    i += 1
+                # Consume data rows until a lone "-1" sentinel.
+                while i < n:
+                    row = lines[i].strip()
+                    if not row:
+                        i += 1
+                        continue
+                    if row.startswith("-1"):
+                        i += 1
+                        break
+                    parts = row.split()
+                    try:
+                        itype = int(parts[0])
+                        ename = parts[1]
+                        keyopts = [int(p) for p in parts[2:]]
+                    except (ValueError, IndexError):
+                        # Unrecognised row — keep it verbatim to be safe.
+                        out_lines.append(lines[i])
+                        i += 1
+                        continue
+                    # ET accepts the element name plus up to 6 positional
+                    # keyopts (KOP1..KOP6). Inline those so downstream
+                    # tools like `abaqus fromansys` that do not recognise
+                    # the standalone KEYOPT command still see them. Only
+                    # the rarely-used keyopts 7..18 remain as separate
+                    # KEYOPT lines.
+                    inline_kops = keyopts[:6]
+                    while inline_kops and inline_kops[-1] == 0:
+                        inline_kops.pop()
+                    et_line = f"ET,{itype},{ename}"
+                    if inline_kops:
+                        et_line += "," + ",".join(str(k) for k in inline_kops)
+                    out_lines.append(et_line + "\n")
+                    for extra_idx in range(6, len(keyopts)):
+                        kop = keyopts[extra_idx]
+                        if kop != 0:
+                            out_lines.append(
+                                f"KEYOPT,{itype},{extra_idx + 1},{kop}\n"
+                            )
+                    expanded += 1
+                    i += 1
+                continue
+            out_lines.append(line)
+            i += 1
+
+        if expanded:
+            with open(cdb_path, "w") as f:
+                f.writelines(out_lines)
+        return expanded
+
+    # Subset of MAPDL material property labels that might appear in MP /
+    # MPDATA commands. Used to detect whether a line is in the blocked
+    # "version-tagged" form (the property label sits at position 3) or
+    # in the classic form (label at position 1).
+    _MP_LABELS = frozenset({
+        "EX", "EY", "EZ", "GXY", "GYZ", "GXZ",
+        "NUXY", "NUYZ", "NUXZ", "PRXY", "PRYZ", "PRXZ",
+        "DENS", "ALPX", "ALPY", "ALPZ", "CTEX", "CTEY", "CTEZ",
+        "KXX", "KYY", "KZZ", "C", "ENTH", "HF", "EMIS",
+        "VISC", "SONC", "MU", "DMPR", "DMPS",
+        "MURX", "MURY", "MURZ", "MGXX", "MGYY", "MGZZ",
+        "RSVX", "RSVY", "RSVZ", "PERX", "PERY", "PERZ",
+        "LSST", "BETD", "REFT",
+    })
+
+    def _rewrite_mp_mpdata_to_classic(self, cdb_path):
+        """Convert MP / MPDATA lines back to the classic comma-separated
+        form that `abaqus fromansys` understands.
+
+        Modern MAPDL CDWRITE (BLOCKED) emits material commands with a
+        release/version tag inserted before the material number:
+
+            MPDATA,R5.0, 1,EX  ,         0, 2.10000000000E+11,
+            MP    ,R5.0, 1,DENS,  7.85000E+03
+
+        abaqus fromansys, however, parses the classic grammar where the
+        property label sits right after the command:
+
+            MPDATA,EX,1,0,2.10000000000E+11
+            MP,DENS,1,7.85E+03
+
+        When fromansys reads the blocked form it treats the version tag
+        ("R5.0" or similar) as the label, emits hundreds of
+        "Material Property <tag> not supported" warnings, and the
+        resulting .inp has no materials at all.
+
+        This rewriter walks each line and, for MP / MPDATA, checks
+        whether the *third* whitespace/comma-separated token is a known
+        MP label while the *first* token is not. In that case it
+        reorders the fields into the classic form. Lines that already
+        look classic, or that we cannot confidently identify, are
+        passed through untouched so we do not corrupt unrelated data.
+        The file is rewritten in place and the number of converted
+        lines is returned.
+        """
+        try:
+            with open(cdb_path, "r") as f:
+                lines = f.readlines()
+        except (FileNotFoundError, OSError):
+            return 0
+
+        def _split_csv(payload):
+            return [tok.strip() for tok in payload.split(",")]
+
+        changed = 0
+        out_lines = []
+        for line in lines:
+            stripped = line.lstrip()
+            upper = stripped.upper()
+            matched_cmd = None
+            for cmd in ("MPDATA", "MP"):
+                if upper.startswith(cmd + ",") or upper.startswith(cmd + " "):
+                    matched_cmd = cmd
+                    break
+                if upper.rstrip() == cmd:
+                    matched_cmd = cmd
+                    break
+                # MAPDL pads command names with spaces (e.g. "MP    ,").
+                head = upper[: len(cmd)]
+                tail = upper[len(cmd) :].lstrip()
+                if head == cmd and tail.startswith(","):
+                    matched_cmd = cmd
+                    break
+            if matched_cmd is None:
+                out_lines.append(line)
+                continue
+
+            # Split off the command, keep the rest as the argument list.
+            comma = stripped.find(",")
+            if comma < 0:
+                out_lines.append(line)
+                continue
+            payload = stripped[comma + 1 :].rstrip("\n")
+            tokens = _split_csv(payload)
+            if len(tokens) < 3:
+                out_lines.append(line)
+                continue
+
+            tok0_upper = tokens[0].upper()
+            tok2_upper = tokens[2].upper() if len(tokens) > 2 else ""
+
+            classic_ok = tok0_upper in self._MP_LABELS
+            blocked_ok = (
+                tok0_upper not in self._MP_LABELS
+                and tok2_upper in self._MP_LABELS
+            )
+
+            if classic_ok or not blocked_ok:
+                out_lines.append(line)
+                continue
+
+            # Blocked form detected: tokens = [tag, mat, lab, rest...]
+            tag, mat, lab, *rest = tokens
+            # Drop trailing empty fields that MAPDL likes to pad with.
+            while rest and rest[-1] == "":
+                rest.pop()
+            new_tokens = [lab, mat, *rest]
+            new_line = f"{matched_cmd}," + ",".join(new_tokens) + "\n"
+            out_lines.append(new_line)
+            changed += 1
+
+        if changed:
+            with open(cdb_path, "w") as f:
+                f.writelines(out_lines)
+        return changed
 
     def _step3_5_extra(self, cdb_path):
         """Placeholder stage between Step 3 and Step 4.
