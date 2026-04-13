@@ -103,6 +103,17 @@ class ConverterApp:
         tk.OptionMenu(frm_run, self.run_until, *step_options).pack(side="left", padx=(0, 15))
         self.btn_run = tk.Button(frm_run, text="Run", command=self._run, width=14, height=2)
         self.btn_run.pack(side="left")
+        self.btn_show_step1 = tk.Button(
+            frm_run,
+            text="Show Step 1 Commands",
+            command=self._show_step1_log,
+            width=22,
+            height=2,
+        )
+        self.btn_show_step1.pack(side="left", padx=(10, 0))
+
+        # Path of the APDL log produced during the most recent Step 1 run.
+        self._step1_log_path = None
 
         # --- Log ---
         frm_log = tk.LabelFrame(self.root, text="Log", padx=10, pady=5)
@@ -123,6 +134,43 @@ class ConverterApp:
         path = filedialog.askdirectory()
         if path:
             self.output_dir.set(path)
+
+    def _show_step1_log(self):
+        """Pop up a window showing the APDL commands recorded during the
+        most recent Step 1 run. Falls back to <output_dir>/step1_apdl.log
+        if the in-memory path isn't set yet (e.g. user opened the app and
+        wants to inspect a previous run's log)."""
+        log_path = self._step1_log_path
+        if not log_path or not os.path.exists(log_path):
+            out_dir = self.output_dir.get()
+            if out_dir:
+                candidate = os.path.join(out_dir, "step1_apdl.log")
+                if os.path.exists(candidate):
+                    log_path = candidate
+        if not log_path or not os.path.exists(log_path):
+            messagebox.showinfo(
+                "Step 1 Commands",
+                "No Step 1 APDL log found yet. Run Step 1 first.",
+            )
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Step 1 - MAPDL Commands ({os.path.basename(log_path)})")
+        win.geometry("800x600")
+
+        txt = scrolledtext.ScrolledText(win, wrap="none")
+        txt.pack(fill="both", expand=True, padx=5, pady=5)
+        try:
+            with open(log_path, "r") as f:
+                content = f.read()
+            if not content.strip():
+                content = "(log file is empty - Step 1 may still be running)"
+            txt.insert("1.0", content)
+        except Exception as e:
+            txt.insert("1.0", f"Error reading log: {e}")
+        txt.config(state="disabled")
+
+        tk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 5))
 
     def _log(self, msg):
         self.log.config(state="normal")
@@ -195,6 +243,15 @@ class ConverterApp:
             additional_switches=extra_switches,
         )
         self._log(f"MAPDL launched (v{mapdl.version})")
+
+        # Step 1에서 실제 실행되는 APDL 커맨드를 파일로 기록해서
+        # "Show Step 1 Commands" 버튼으로 사용자가 검토할 수 있게 한다.
+        self._step1_log_path = os.path.join(out_dir, "step1_apdl.log")
+        try:
+            mapdl.open_apdl_log(self._step1_log_path, mode="w")
+            self._log(f"APDL command log: {self._step1_log_path}")
+        except Exception as e:
+            self._log(f"  (APDL log not started: {e})")
 
         try:
             # Resume .db — MAPDL은 run_location 기준으로 파일을 찾으므로
@@ -322,6 +379,14 @@ class ConverterApp:
         # ── 5) 저장된 ARRAY/TABLE 파라미터 모두 삭제 ──
         n_arrays = self._delete_array_params(mapdl)
         self._log(f"  Deleted {n_arrays} array/table parameter(s).")
+
+        # ── 6) 남은 사용자 정의 파라미터 일괄 삭제 (*DEL,ALL) ──
+        # KABS=0 이므로 _XXX 형태의 PyMAPDL 내부 파라미터는 보존된다.
+        try:
+            mapdl.run("*DEL,ALL")
+            self._log("  Issued *DEL,ALL (cleared user parameters).")
+        except Exception as e:
+            self._log(f"  Warning: *DEL,ALL failed: {e}")
 
     def _parse_celist(self, mapdl):
         """Dump CELIST to a text file and parse it.
