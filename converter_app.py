@@ -215,9 +215,9 @@ class ConverterApp:
             tol = float(self.node_tol.get())
             mapdl.nummrg("NODE", tol)
 
-            # Contact/Tie 처리: slave/master CM 생성 → 기타 CM / contact / load 삭제
-            self._log("Processing contact/tie pairs and loads...")
-            self._handle_contacts_and_loads(mapdl)
+            # Tie(CE/CEINTF) 처리: slave/master CM 생성 → 기타 CM / CE / load 삭제
+            self._log("Processing tie (CE) conditions and loads...")
+            self._handle_ties_and_loads(mapdl)
 
             # 미사용 물성 삭제
             self._log("Removing unused material properties...")
@@ -246,111 +246,49 @@ class ConverterApp:
             mapdl.exit()
             self._log("MAPDL closed.")
 
-    def _handle_contacts_and_loads(self, mapdl):
-        """Create CMs for each contact/tie pair's slave (CONTA) and master
-        (TARGE) nodes, delete all other components, then delete the
-        contact/tie elements and every applied load so that the exported
-        CDB contains only geometry, materials, and the preserved CMs."""
-        contact_enames = [171, 172, 173, 174, 175, 176, 177, 178]
-        target_enames = [169, 170]
+    def _handle_ties_and_loads(self, mapdl):
+        """Detect tie conditions defined via constraint equations (CE/CEINTF).
 
+        CEINTF generates one CE per dependent (slave) node that couples it
+        to a set of independent (master) nodes on the mating surface. We
+        collect every dependent node into TIE_SLAVE and every independent
+        node into TIE_MASTER, then remove all other components, all CEs,
+        and all applied loads before the CDWRITE."""
         mapdl.allsel("ALL")
 
-        # ── 1) contact/target 요소가 사용하는 REAL 번호 수집 ──
-        real_ids = set()
-        for ename in contact_enames + target_enames:
-            try:
-                mapdl.esel("S", "ENAME", "", ename)
-            except Exception:
-                continue
-            try:
-                n = int(mapdl.get("NE", "ELEM", "", "COUNT"))
-            except Exception:
-                n = 0
-            if n == 0:
-                continue
-            try:
-                max_enum = int(mapdl.get("MAXE", "ELEM", "", "NUM", "MAX"))
-            except Exception:
-                max_enum = 0
-            if max_enum <= 0:
-                continue
-            try:
-                mapdl.run(f"*DEL,_REALARR,,NOPR")
-            except Exception:
-                pass
-            try:
-                mapdl.run(f"*DIM,_REALARR,ARRAY,{max_enum}")
-                mapdl.run("*VGET,_REALARR(1),ELEM,1,ATTR,REAL")
-                arr = mapdl.parameters["_REALARR"].flatten()
-                real_ids.update(int(x) for x in arr if x > 0)
-            except Exception:
-                pass
-            finally:
-                try:
-                    mapdl.run("*DEL,_REALARR,,NOPR")
-                except Exception:
-                    pass
+        # ── 1) 현재 정의된 CE 개수 확인 ──
+        try:
+            ce_count = int(mapdl.get("NCE", "CE", 0, "NUM", "COUNT"))
+        except Exception:
+            ce_count = 0
+        self._log(f"  Found {ce_count} constraint equation(s).")
 
-        mapdl.allsel("ALL")
-        self._log(f"  Found {len(real_ids)} contact/tie pair(s).")
+        slave_nodes = set()
+        master_nodes = set()
 
-        # ── 2) 각 pair별로 slave/master CM 생성 ──
+        if ce_count > 0:
+            equations = self._parse_celist(mapdl)
+            self._log(f"  Parsed {len(equations)} CE block(s) from CELIST.")
+            for dep, indeps in equations:
+                if dep is not None:
+                    slave_nodes.add(dep)
+                master_nodes.update(indeps)
+            # slave 우선 - 양쪽에 동시에 들어간 노드는 master에서 제외
+            master_nodes -= slave_nodes
+
         created_cms = set()
 
-        def _esel_by_enames(enames):
-            first = True
-            for en in enames:
-                try:
-                    if first:
-                        mapdl.esel("S", "ENAME", "", en)
-                    else:
-                        mapdl.esel("A", "ENAME", "", en)
-                    first = False
-                except Exception:
-                    pass
-            return not first
-
-        for rid in sorted(real_ids):
-            # Slave: CONTA elements
-            mapdl.allsel("ALL")
-            if _esel_by_enames(contact_enames):
-                try:
-                    mapdl.esel("R", "REAL", "", rid)
-                    n = int(mapdl.get("NE", "ELEM", "", "COUNT"))
-                except Exception:
-                    n = 0
-                if n > 0:
-                    mapdl.nsle()
-                    cm_name = f"SLAVE_R{rid}"
-                    try:
-                        mapdl.cm(cm_name, "NODE")
-                        created_cms.add(cm_name.upper())
-                        self._log(f"  Created CM {cm_name} ({n} contact elements)")
-                    except Exception as e:
-                        self._log(f"  Warning: could not create {cm_name}: {e}")
-
-            # Master: TARGE elements
-            mapdl.allsel("ALL")
-            if _esel_by_enames(target_enames):
-                try:
-                    mapdl.esel("R", "REAL", "", rid)
-                    n = int(mapdl.get("NE", "ELEM", "", "COUNT"))
-                except Exception:
-                    n = 0
-                if n > 0:
-                    mapdl.nsle()
-                    cm_name = f"MASTER_R{rid}"
-                    try:
-                        mapdl.cm(cm_name, "NODE")
-                        created_cms.add(cm_name.upper())
-                        self._log(f"  Created CM {cm_name} ({n} target elements)")
-                    except Exception as e:
-                        self._log(f"  Warning: could not create {cm_name}: {e}")
+        # ── 2) 노드 리스트로부터 CM 생성 (매크로로 NSEL,A 일괄 처리) ──
+        if slave_nodes and self._create_cm_from_node_list(mapdl, "TIE_SLAVE", slave_nodes):
+            created_cms.add("TIE_SLAVE")
+            self._log(f"  Created CM TIE_SLAVE ({len(slave_nodes)} nodes)")
+        if master_nodes and self._create_cm_from_node_list(mapdl, "TIE_MASTER", master_nodes):
+            created_cms.add("TIE_MASTER")
+            self._log(f"  Created CM TIE_MASTER ({len(master_nodes)} nodes)")
 
         mapdl.allsel("ALL")
 
-        # ── 3) 보존 대상(SLAVE_*/MASTER_*)을 제외한 나머지 CM 모두 삭제 ──
+        # ── 3) 보존 대상(TIE_SLAVE/TIE_MASTER)을 제외한 나머지 CM 모두 삭제 ──
         existing_cms = self._list_all_components(mapdl)
         deleted_cm = 0
         for name in existing_cms:
@@ -361,22 +299,14 @@ class ConverterApp:
                 deleted_cm += 1
             except Exception:
                 pass
-        self._log(f"  Deleted {deleted_cm} non-contact component(s).")
+        self._log(f"  Deleted {deleted_cm} non-tie component(s).")
 
-        # ── 4) contact/tie 요소 삭제 ──
-        mapdl.allsel("ALL")
-        deleted_elems = 0
-        for ename in contact_enames + target_enames:
-            try:
-                mapdl.esel("S", "ENAME", "", ename)
-                n = int(mapdl.get("NE", "ELEM", "", "COUNT"))
-                if n > 0:
-                    mapdl.edele("ALL")
-                    deleted_elems += n
-            except Exception:
-                pass
-        mapdl.allsel("ALL")
-        self._log(f"  Deleted {deleted_elems} contact/tie element(s).")
+        # ── 4) 모든 제약방정식(CE) 삭제 ──
+        try:
+            mapdl.cedele("ALL")
+            self._log("  Deleted all constraint equations (CEDELE,ALL).")
+        except Exception as e:
+            self._log(f"  Warning: CEDELE failed: {e}")
 
         # ── 5) 모든 하중/경계조건 삭제 ──
         load_cmds = [
@@ -393,6 +323,99 @@ class ConverterApp:
             except Exception:
                 pass
         self._log("  Deleted all applied loads/BCs.")
+
+    def _parse_celist(self, mapdl):
+        """Dump CELIST to a text file and parse it.
+
+        Returns a list of (dep_node, set_of_indep_nodes). The first node
+        listed in each CE block is treated as the dependent (slave); all
+        subsequent nodes are the independent (master) set."""
+        macro_path = os.path.join(mapdl.directory, "_dump_celist.mac")
+        try:
+            with open(macro_path, "w") as f:
+                f.write("/OUTPUT,_celist,txt\n")
+                f.write("CELIST,ALL,,,ANY\n")
+                f.write("/OUTPUT\n")
+            mapdl.input(macro_path)
+        except Exception:
+            # Fallback to simpler CELIST signature
+            try:
+                with open(macro_path, "w") as f:
+                    f.write("/OUTPUT,_celist,txt\n")
+                    f.write("CELIST\n")
+                    f.write("/OUTPUT\n")
+                mapdl.input(macro_path)
+            except Exception:
+                return []
+
+        celist_path = os.path.join(mapdl.directory, "_celist.txt")
+        equations = []
+        current_dep = None
+        current_indep = set()
+        in_eq = False
+
+        # MAPDL CELIST 노드 라인 패턴 (두 가지 가능한 포맷 모두 수용)
+        node_patterns = [
+            re.compile(r"NODE\s*=\s*(\d+)", re.IGNORECASE),
+            re.compile(r"^\s*(\d+)\s+[A-Za-z]{1,4}\s+[-+0-9.Ee]+"),
+        ]
+        header_pat = re.compile(r"CONSTRAINT\s+EQUATION", re.IGNORECASE)
+
+        try:
+            with open(celist_path, "r") as f:
+                for line in f:
+                    if header_pat.search(line):
+                        if current_dep is not None or current_indep:
+                            equations.append((current_dep, current_indep))
+                        current_dep = None
+                        current_indep = set()
+                        in_eq = True
+                        continue
+                    if not in_eq:
+                        continue
+                    node_val = None
+                    for pat in node_patterns:
+                        m = pat.search(line)
+                        if m:
+                            try:
+                                node_val = int(m.group(1))
+                            except ValueError:
+                                node_val = None
+                            break
+                    if node_val is None:
+                        continue
+                    if current_dep is None:
+                        current_dep = node_val
+                    else:
+                        current_indep.add(node_val)
+            if current_dep is not None or current_indep:
+                equations.append((current_dep, current_indep))
+        except FileNotFoundError:
+            return []
+
+        return equations
+
+    def _create_cm_from_node_list(self, mapdl, cm_name, nodes):
+        """Select the given node numbers and save them as a NODE component.
+
+        Uses a local macro file with chunked NSEL,A lines to avoid
+        per-call round-trips through PyMAPDL."""
+        if not nodes:
+            return False
+        macro_path = os.path.join(mapdl.directory, f"_mkcm_{cm_name}.mac")
+        try:
+            with open(macro_path, "w") as f:
+                f.write("ALLSEL,ALL\n")
+                f.write("NSEL,NONE\n")
+                for node in sorted(nodes):
+                    f.write(f"NSEL,A,NODE,,{node}\n")
+                f.write(f"CM,{cm_name},NODE\n")
+                f.write("ALLSEL,ALL\n")
+            mapdl.input(macro_path)
+            return True
+        except Exception as e:
+            self._log(f"  Warning: failed to create {cm_name}: {e}")
+            return False
 
     def _list_all_components(self, mapdl):
         """Return a list of every currently defined component name."""
