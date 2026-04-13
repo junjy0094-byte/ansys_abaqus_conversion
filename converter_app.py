@@ -18,6 +18,9 @@ class ConverterApp:
         self.output_dir = tk.StringVar()
         self.abaqus_cmd = tk.StringVar(value="abaqus")
         self.node_tol = tk.StringVar(value="1e-6")
+        # UNBLOCKED CDWRITE format expands ETBLOCK into classic ET/KEYOPT
+        # cards so older HyperMesh versions can read the .cdb. Default on.
+        self.cdwrite_unblocked = tk.BooleanVar(value=True)
 
         # MAPDL launch settings
         self.mapdl_version = tk.StringVar(value="242")
@@ -50,6 +53,12 @@ class ConverterApp:
 
         tk.Label(frm_set, text="Node Merge Tol:").grid(row=0, column=2, sticky="w", padx=(20, 0))
         tk.Entry(frm_set, textvariable=self.node_tol, width=12).grid(row=0, column=3, sticky="w", padx=5)
+
+        tk.Checkbutton(
+            frm_set,
+            text="CDWRITE UNBLOCKED (HyperMesh compatible)",
+            variable=self.cdwrite_unblocked,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 0))
 
         # --- MAPDL Launch Settings ---
         frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
@@ -289,17 +298,15 @@ class ConverterApp:
             self._log(f"{db_name}.db saved.")
 
             # --- Step 2b: CDWRITE ---
-            # Full pipeline (Step 4) keeps the default BLOCKED format for
-            # speed/size. When stopping early for HyperMesh debugging
-            # (Step 1&2 or Step 3), write UNBLOCKED so ET/KEYOPT are
-            # emitted as individual cards instead of an ETBLOCK block
-            # that older HyperMesh versions do not parse.
+            # UNBLOCKED emits ET/KEYOPT as individual cards so HyperMesh
+            # can read them (default). Unchecking the option falls back
+            # to the default BLOCKED format used by ANSYS 2023 R1+.
             cdb_name = "clean_model"
-            is_full_run = "Step 4" in self.run_until.get()
-            fmat = "" if is_full_run else "UNBLOCKED"
+            use_unblocked = bool(self.cdwrite_unblocked.get())
+            fmat = "UNBLOCKED" if use_unblocked else ""
             self._log(
                 f"Writing {cdb_name}.cdb "
-                f"({'BLOCKED' if is_full_run else 'UNBLOCKED'} format) ..."
+                f"({'UNBLOCKED' if use_unblocked else 'BLOCKED'} format) ..."
             )
             mapdl.cdwrite("DB", cdb_name, "cdb", fmat=fmat)
             self._log("CDWRITE complete.")
