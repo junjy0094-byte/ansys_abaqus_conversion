@@ -3,6 +3,7 @@ from tkinter import filedialog, scrolledtext, messagebox
 import threading
 import subprocess
 import os
+import re
 import shutil
 
 
@@ -208,7 +209,7 @@ class ConverterApp:
 
             # 넘버링 압축 (MAT 제외 - 물성 번호는 압축하지 않음)
             self._log("Compressing numbering...")
-            for entity in ["NODE", "ELEM", "REAL", "TYPE"]:
+            for entity in ["NODE", "ELEM"]:
                 mapdl.numcmp(entity)
 
             mapdl.allsel("ALL")
@@ -230,7 +231,7 @@ class ConverterApp:
             self._log("MAPDL closed.")
 
     def _remove_unused_mats(self, mapdl):
-        """미사용 물성 찾아서 삭제 (*VGET 벌크 방식)"""
+        """미사용 물성 찾아서 삭제 — MPLIST 파일 파싱 방식"""
         mapdl.allsel("ALL")
         elem_count = int(mapdl.get("NELEM", "ELEM", "", "COUNT"))
 
@@ -238,52 +239,55 @@ class ConverterApp:
             self._log("  No elements found, skipping.")
             return
 
-        # *VGET 은 배열 인덱스 = 요소 번호이므로 최대 요소 번호로 배열 크기 설정
+        # ── 1) 사용 중인 MAT 번호 수집 (*VGET) ──
         max_enum = int(mapdl.get("MAXE", "ELEM", "", "NUM", "MAX"))
         try:
             mapdl.run(f"*DIM,_MATARR,ARRAY,{max_enum}")
             mapdl.run("*VGET,_MATARR(1),ELEM,1,ATTR,MAT")
             mat_array = mapdl.parameters["_MATARR"].flatten()
-            used_mats = set(mat_array[mat_array > 0].astype(int).tolist())
+            used_mats = set(int(x) for x in mat_array if x > 0)
         except Exception:
-            self._log("  Warning: Could not bulk-read element MAT attrs, skipping unused MAT deletion.")
+            self._log("  Warning: Could not bulk-read element MAT attrs, skipping.")
             return
 
-        self._log(f"  {len(used_mats)} material(s) in use (out of {elem_count} elements).")
+        # ── 2) MPLIST → txt 파일로 추출 후 파싱 ──
+        #   PyMAPDL이 /OUTPUT를 가로채므로 매크로 파일로 우회
+        macro_path = os.path.join(mapdl.directory, "_dump_mplist.mac")
+        with open(macro_path, "w") as f:
+            f.write("/OUTPUT,_mplist,txt\n")
+            f.write("MPLIST,ALL\n")
+            f.write("/OUTPUT\n")
+        mapdl.input(macro_path)
+        mplist_path = os.path.join(mapdl.directory, "_mplist.txt")
 
-        # 전체 MAT 번호 수집 후 일괄 삭제 (순회 중 삭제 방지)
-        mat_count = int(mapdl.get("NMAT", "MAT", "", "COUNT"))
-        if mat_count == 0:
+        all_mats = set()
+        try:
+            with open(mplist_path, "r") as f:
+                for line in f:
+                    m = re.search(r'MATERIAL\s+NUMBER\s*=?\s*(\d+)', line, re.IGNORECASE)
+                    if m:
+                        all_mats.add(int(m.group(1)))
+        except FileNotFoundError:
+            self._log("  Warning: MPLIST output file not found, skipping.")
             return
 
-        all_mats = []
-        mat_id = 0
-        for _ in range(mat_count):
-            mat_id = int(mapdl.get("MID", "MAT", mat_id, "NXTH"))
-            if mat_id == 0:
-                break
-            all_mats.append(mat_id)
+        self._log(f"  {len(used_mats)} material(s) in use, {len(all_mats)} defined.")
 
-        self._log(f"  {len(all_mats)} material(s) defined, used: {sorted(used_mats)}")
-
-        unused = [m for m in all_mats if m not in used_mats]
+        # ── 3) 미사용 MAT 삭제 ──
+        unused = sorted(all_mats - used_mats)
         self._log(f"  {len(unused)} unused material(s) to delete...")
 
         deleted = 0
-        for mat_id in unused:
-            ok = False
+        for mid in unused:
             try:
-                mapdl.mpdele("ALL", mat_id)
-                ok = True
+                mapdl.mpdele("ALL", mid)
             except Exception:
                 pass
             try:
-                mapdl.tbdele("ALL", mat_id)
-                ok = True
+                mapdl.tbdele("ALL", mid)
             except Exception:
                 pass
-            if ok:
-                deleted += 1
+            deleted += 1
 
         self._log(f"  Deleted {deleted} / {len(unused)} unused material(s).")
 
