@@ -1234,6 +1234,7 @@ class ConverterApp:
     def _read_nsets_txt(self, nset_path):
         nsets = {}
         cur = None
+        int_pat = re.compile(r"[-+]?\d+")
         with open(nset_path, "r") as f:
             for raw in f:
                 s = raw.strip()
@@ -1245,10 +1246,8 @@ class ConverterApp:
                     continue
                 if cur is None:
                     continue
-                for tok in s.split(","):
-                    tok = tok.strip()
-                    if tok.isdigit():
-                        nsets[cur].append(int(tok))
+                for tok in int_pat.findall(s):
+                    nsets[cur].append(int(tok))
         for k in list(nsets.keys()):
             nsets[k] = sorted(set(nsets[k]))
         return nsets
@@ -1310,16 +1309,16 @@ class ConverterApp:
 
                 if not cur_prop:
                     continue
-                tokens = s.split()
+                nums = re.findall(num_re, s)
                 # 빈 temperature(상수값) 케이스: 값 1개만 있는 행
-                if len(tokens) == 1:
-                    val = _to_float(tokens[0])
+                if len(nums) == 1:
+                    val = _to_float(nums[0])
                     if val is not None:
                         mats[cur_id]["props"][cur_prop]["rows"].append((None, val))
                     continue
                 # 일반 케이스: temp + value
-                t = _to_float(tokens[0])
-                v = _to_float(tokens[1])
+                t = _to_float(nums[0]) if len(nums) >= 1 else None
+                v = _to_float(nums[1]) if len(nums) >= 2 else None
                 if t is not None and v is not None:
                     mats[cur_id]["props"][cur_prop]["rows"].append((t, v))
         return mats
