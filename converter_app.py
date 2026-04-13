@@ -381,11 +381,33 @@ class ConverterApp:
             bc_all = [best]
 
         master = self._get_component_element_ids(
-            mapdl, ["TIE_MASTER", "tie_master", "TIE_MAST", "MASTER_TIE", "master_tie", "MASTER_T"]
+            mapdl,
+            [
+                "TIE_MASTER", "tie_master", "TIE_MAST", "MASTER_TIE", "master_tie", "MASTER_T",
+                "MASTER", "master",
+            ],
         )
         slave = self._get_component_element_ids(
-            mapdl, ["TIE_SLAVE", "tie_slave", "TIE_SLAV", "SLAVE_TIE", "slave_tie", "SLAVE_TI"]
+            mapdl,
+            [
+                "TIE_SLAVE", "tie_slave", "TIE_SLAV", "SLAVE_TIE", "slave_tie", "SLAVE_TI",
+                "SLAVE", "slave",
+            ],
         )
+
+        # 일부 모델에서는 컴포넌트명이 규칙에서 살짝 벗어나거나(예: 접두/접미)
+        # 슬레이브만 이름이 달라서 누락될 수 있다. 이름 패턴 기반으로 한 번 더 보강.
+        if not master:
+            auto_master = self._get_component_element_ids_by_keywords(mapdl, include=("MASTER", "TIE"))
+            if auto_master:
+                master = auto_master
+                self._log(f"  tie master fallback by name pattern: {len(master)} element(s)")
+        if not slave:
+            auto_slave = self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE", "TIE"))
+            if auto_slave:
+                slave = auto_slave
+                self._log(f"  tie slave fallback by name pattern: {len(slave)} element(s)")
+
         self._log(f"  tie element sets: master={len(master)} slave={len(slave)}")
         mapdl.allsel("ALL")
 
@@ -398,6 +420,24 @@ class ConverterApp:
             "master_tie": master,
             "slave_tie": slave,
         }
+
+    def _get_component_element_ids_by_keywords(self, mapdl, include):
+        """Find a component by name keywords and return its element IDs.
+
+        Example: include=("SLAVE", "TIE") matches names like
+        TIE_SLAVE, SLAVE_TIE, MY_TIE_SLAVE_SET, etc.
+        """
+        names = self._list_all_components(mapdl)
+        if not names:
+            return []
+        keys = tuple(k.upper() for k in include)
+        for name in names:
+            up = name.upper()
+            if all(k in up for k in keys):
+                ids = self._get_component_element_ids(mapdl, [name])
+                if ids:
+                    return ids
+        return []
 
     def _get_component_element_ids(self, mapdl, candidates):
         existing = {name.upper(): name for name in self._list_all_components(mapdl)}
