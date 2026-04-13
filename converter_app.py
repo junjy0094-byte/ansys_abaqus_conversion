@@ -448,6 +448,16 @@ class ConverterApp:
             mapdl.allsel("ALL")
             mapdl.cmsel("S", target, "NODE")
             ids = [int(v) for v in mapdl.mesh.nnum.tolist()]
+            if ids:
+                return sorted(set(ids))
+            # Fallback: 컴포넌트가 ELEM 타입인 경우 요소 선택 후 노드 확장
+            mapdl.allsel("ALL")
+            mapdl.cmsel("S", target)
+            try:
+                mapdl.nsle("S")
+            except Exception:
+                pass
+            ids = [int(v) for v in mapdl.mesh.nnum.tolist()]
             return sorted(set(ids))
         except Exception:
             return []
