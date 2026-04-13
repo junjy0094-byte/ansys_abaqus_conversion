@@ -541,25 +541,44 @@ class ConverterApp:
                 pass
 
     def _get_component_type(self, mapdl, target_name):
-        """Return component entity type from CMLIST output (NODE/ELEM/...)."""
+        """Return component entity type from CMLIST output (NODE/ELEM/...).
+
+        CMLIST 단독 호출에서 일부 컴포넌트(특히 TIE_MASTER/TIE_SLAVE)가
+        누락되는 사례가 있어, 일반 CMLIST 와 ``CMSEL,S,TIE_MASTER`` +
+        ``CMSEL,A,TIE_SLAVE`` 후 CMLIST 두 결과를 모두 파싱한다.
+        """
         macro_path = os.path.join(mapdl.directory, "_dump_cmlist_type.mac")
         try:
             with open(macro_path, "w") as f:
-                f.write("/OUTPUT,_cmlist_type,txt\n")
+                f.write("ALLSEL,ALL\n")
+                f.write("CMSEL,ALL\n")
+                f.write("/OUTPUT,_cmlist_type_all,txt\n")
                 f.write("CMLIST\n")
                 f.write("/OUTPUT\n")
+                f.write("/NERR,0,99999999\n")
+                f.write("CMSEL,S,TIE_MASTER\n")
+                f.write("CMSEL,A,TIE_SLAVE\n")
+                f.write("/NERR,5,99999999\n")
+                f.write("/OUTPUT,_cmlist_type_tie,txt\n")
+                f.write("CMLIST\n")
+                f.write("/OUTPUT\n")
+                f.write("CMSEL,ALL\n")
+                f.write("ALLSEL,ALL\n")
             mapdl.input(macro_path)
         except Exception:
             return None
-        cmlist_path = os.path.join(mapdl.directory, "_cmlist_type.txt")
-        try:
-            with open(cmlist_path, "r") as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) >= 2 and parts[0].upper() == target_name.upper():
-                        return parts[1].upper()
-        except FileNotFoundError:
-            return None
+
+        target_upper = target_name.upper()
+        for fn in ("_cmlist_type_tie.txt", "_cmlist_type_all.txt"):
+            path = os.path.join(mapdl.directory, fn)
+            try:
+                with open(path, "r") as f:
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[0].upper() == target_upper:
+                            return parts[1].upper()
+            except FileNotFoundError:
+                continue
         return None
 
     def _get_component_node_ids(self, mapdl, candidates):
@@ -897,40 +916,74 @@ class ConverterApp:
             return False
 
     def _list_all_components(self, mapdl):
-        """Return a list of every currently defined component name."""
-        # Prefer PyMAPDL's component manager when available
-        try:
-            comp = getattr(mapdl, "components", None)
-            if comp is not None:
-                names = list(comp.names)
-                if names:
-                    return names
-        except Exception:
-            pass
+        """Return a list of every currently defined component name.
 
-        # Fallback: dump CMLIST via macro and parse names
+        CMLIST 출력에서 일부 component (특히 TIE_MASTER/TIE_SLAVE)가
+        누락되는 사례가 있어 ALLSEL 만으로는 보강이 안 된다. 그래서
+        다음 두 경로의 결과를 모두 합쳐서 반환한다:
+
+        1) 일반 CMLIST 결과
+        2) ``CMSEL,S,TIE_MASTER`` + ``CMSEL,A,TIE_SLAVE`` 후 CMLIST 결과
+           (TIE 컴포넌트가 명시적으로 활성화되어 누락 없이 출력됨)
+        3) PyMAPDL ``mapdl.components.names`` (있을 때)
+        """
+        names = []
+        seen = set()
+
+        def _add(name):
+            up = name.upper()
+            if up in seen:
+                return
+            seen.add(up)
+            names.append(name)
+
         macro_path = os.path.join(mapdl.directory, "_dump_cmlist.mac")
         try:
             with open(macro_path, "w") as f:
-                f.write("/OUTPUT,_cmlist,txt\n")
+                # ── 1) 전체 CMLIST ──
+                f.write("ALLSEL,ALL\n")
+                f.write("CMSEL,ALL\n")
+                f.write("/OUTPUT,_cmlist_all,txt\n")
                 f.write("CMLIST\n")
                 f.write("/OUTPUT\n")
+                # ── 2) tie 컴포넌트만 명시적으로 선택 후 CMLIST ──
+                # CMSEL이 존재하지 않는 컴포넌트에 대해 노트만 띄우고
+                # 매크로 흐름은 멈추지 않음. /NERR 로 abort 회피.
+                f.write("/NERR,0,99999999\n")
+                f.write("CMSEL,S,TIE_MASTER\n")
+                f.write("CMSEL,A,TIE_SLAVE\n")
+                f.write("/NERR,5,99999999\n")
+                f.write("/OUTPUT,_cmlist_tie,txt\n")
+                f.write("CMLIST\n")
+                f.write("/OUTPUT\n")
+                f.write("CMSEL,ALL\n")
+                f.write("ALLSEL,ALL\n")
             mapdl.input(macro_path)
         except Exception:
-            return []
-
-        cmlist_path = os.path.join(mapdl.directory, "_cmlist.txt")
-        names = []
-        valid_types = {"NODE", "ELEM", "ELEMENT", "KP", "LINE", "AREA", "VOLU"}
-        try:
-            with open(cmlist_path, "r") as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) >= 2 and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", parts[0]):
-                        if parts[1].upper() in valid_types:
-                            names.append(parts[0])
-        except FileNotFoundError:
             pass
+
+        valid_types = {"NODE", "ELEM", "ELEMENT", "KP", "LINE", "AREA", "VOLU"}
+        for fn in ("_cmlist_all.txt", "_cmlist_tie.txt"):
+            path = os.path.join(mapdl.directory, fn)
+            try:
+                with open(path, "r") as f:
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) >= 2 and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", parts[0]):
+                            if parts[1].upper() in valid_types:
+                                _add(parts[0])
+            except FileNotFoundError:
+                continue
+
+        # 3) PyMAPDL component manager 결과도 머지
+        try:
+            comp = getattr(mapdl, "components", None)
+            if comp is not None:
+                for n in list(comp.names):
+                    _add(n)
+        except Exception:
+            pass
+
         return names
 
     def _remove_unused_mats(self, mapdl):
