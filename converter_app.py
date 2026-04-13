@@ -23,16 +23,10 @@ class ConverterApp:
         # NOTE: abaqus fromansys (Step 4) requires BLOCKED nblock/eblock,
         # so a full Step 4 run forces BLOCKED regardless of this flag.
         self.cdwrite_unblocked = tk.BooleanVar(value=True)
-        # Step 3 text-level CDB cleanup toggle. When disabled, the .cdb
-        # produced by Step 1&2 is passed straight to Step 4.
-        self.cdb_cleanup_enabled = tk.BooleanVar(value=True)
-
         # MAPDL launch settings
         self.mapdl_version = tk.StringVar(value="242")
         self.nproc = tk.StringVar(value="4")
-        self.ram = tk.StringVar(value="")
         self.license_type = tk.StringVar(value="preppost")
-        self.extra_switches = tk.StringVar(value="")
 
         self._build_ui()
 
@@ -65,12 +59,6 @@ class ConverterApp:
             variable=self.cdwrite_unblocked,
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 0))
 
-        tk.Checkbutton(
-            frm_set,
-            text="Run Step 3 CDB text cleanup",
-            variable=self.cdb_cleanup_enabled,
-        ).grid(row=2, column=0, columnspan=4, sticky="w")
-
         # --- MAPDL Launch Settings ---
         frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
         frm_mapdl.pack(fill="x", padx=10, pady=5)
@@ -81,33 +69,9 @@ class ConverterApp:
         tk.Label(frm_mapdl, text="Processors:").grid(row=0, column=2, sticky="w", padx=(15, 0))
         tk.Entry(frm_mapdl, textvariable=self.nproc, width=6).grid(row=0, column=3, sticky="w", padx=5)
 
-        tk.Label(frm_mapdl, text="RAM MB (blank=auto):").grid(row=0, column=4, sticky="w", padx=(15, 0))
-        tk.Entry(frm_mapdl, textvariable=self.ram, width=8).grid(row=0, column=5, sticky="w", padx=5)
-
         tk.Label(frm_mapdl, text="License Type:").grid(row=1, column=0, sticky="w", pady=(5, 0))
         license_options = ["preppost", "ansys", "mech", "struct", "dyna", "enterprise"]
         tk.OptionMenu(frm_mapdl, self.license_type, *license_options).grid(row=1, column=1, sticky="w", padx=5, pady=(5, 0))
-
-        tk.Label(frm_mapdl, text="Extra Switches:").grid(row=1, column=2, sticky="w", padx=(15, 0), pady=(5, 0))
-        tk.Entry(frm_mapdl, textvariable=self.extra_switches, width=30).grid(
-            row=1, column=3, columnspan=3, sticky="w", padx=5, pady=(5, 0)
-        )
-
-        # --- Step 3: Remove Blocks ---
-        frm_blk = tk.LabelFrame(self.root, text="Step 3 - CDB Command Blocks to Remove (one per line)", padx=10, pady=5)
-        frm_blk.pack(fill="x", padx=10, pady=5)
-
-        self.txt_blocks = tk.Text(frm_blk, height=12, width=80)
-        self.txt_blocks.pack(fill="x")
-        default_cards = [
-            "/COM", "/TITLE", "DOF", "ANTYPE", "ACEL",
-            "CGLOC", "CGOMGA", "DCGOMG", "DOMEGA", "IRLF",
-            "OMEGA", "KUSE", "ALPHAD", "BETAD", "DMPRAT",
-            "CRPLIM", "NCNV", "ERESX", "TIME", "NEQIT",
-            "TREF", "BFUNIF", "TOFFST", "NUMOFF", "CECMOD",
-            "CE", "UnsupportedCard",
-        ]
-        self.txt_blocks.insert("1.0", "\n".join(default_cards))
 
         # --- Run ---
         frm_run = tk.Frame(self.root, pady=5)
@@ -117,20 +81,27 @@ class ConverterApp:
         tk.Label(frm_run, text="Run up to:").pack(side="left", padx=(0, 5))
         step_options = [
             "Step 1&2 (Cleanup + CDWRITE)",
-            "Step 3 (CDB Text Clean)",
             "Step 4 (Full)",
         ]
-        tk.OptionMenu(frm_run, self.run_until, *step_options).pack(side="left", padx=(0, 15))
-        self.btn_run = tk.Button(frm_run, text="Run", command=self._run, width=14, height=2)
-        self.btn_run.pack(side="left")
+        self.run_upto_menu = tk.OptionMenu(frm_run, self.run_until, *step_options)
+        self.run_upto_menu.config(width=28, height=2)
+        self.run_upto_menu.pack(side="left", padx=(0, 15))
+        self.btn_run = tk.Button(
+            frm_run, text="Run", command=self._run, width=14, height=2,
+            bg="#2E8B57", fg="white", activebackground="#3BA66B", activeforeground="white"
+        )
+        self.btn_run.pack(side="right")
+
+        frm_step1_cmd = tk.Frame(self.root)
+        frm_step1_cmd.pack(fill="x", padx=10, pady=(0, 5))
         self.btn_show_step1 = tk.Button(
-            frm_run,
+            frm_step1_cmd,
             text="Show Step 1 Commands",
             command=self._show_step1_log,
             width=22,
             height=2,
         )
-        self.btn_show_step1.pack(side="left", padx=(10, 0))
+        self.btn_show_step1.pack(side="left")
 
         # Path of the APDL log produced during the most recent Step 1 run.
         self._step1_log_path = None
@@ -214,20 +185,7 @@ class ConverterApp:
             if "Step 1&2" in until:
                 self._log("\n=== Stopped after Step 1&2 ===")
                 return
-
-            if self.cdb_cleanup_enabled.get():
-                cdb_path = self._step3_clean_cdb()
-            else:
-                self._log("\n=== Step 3: CDB text cleanup DISABLED ===")
-                cdb_path = os.path.join(self.output_dir.get(), "clean_model.cdb")
-            if "Step 3" in until:
-                self._log("\n=== Stopped after Step 3 ===")
-                return
-
-            # Placeholder: additional CDB adjustments between Step 3 and Step 4.
-            # Details will be configured later.
-            cdb_path = self._step3_5_extra(cdb_path)
-
+            cdb_path = os.path.join(self.output_dir.get(), "clean_model.cdb")
             self._step4_convert(cdb_path)
             self._log("\n=== All steps completed ===")
         except Exception as e:
@@ -253,18 +211,15 @@ class ConverterApp:
             version = 242
 
         nproc = int(self.nproc.get().strip()) if self.nproc.get().strip() else 4
-        ram = int(self.ram.get().strip()) if self.ram.get().strip() else None
-        license_type = self.license_type.get().strip() or "ansys"
-        extra_switches = self.extra_switches.get().strip() or ""
+        license_type = self.license_type.get().strip() or "preppost"
 
         mapdl = launch_mapdl(
             run_location=out_dir,
             override=True,
             version=version,
             nproc=nproc,
-            ram=ram,
             license_type=license_type,
-            additional_switches=extra_switches,
+            additional_switches="-smp",
         )
         self._log(f"MAPDL launched (v{mapdl.version})")
 
@@ -793,64 +748,6 @@ class ConverterApp:
 
         self._log(f"  Deleted {deleted} / {len(unused)} unused material(s).")
 
-    def _step3_clean_cdb(self):
-        """CDB 텍스트에서 불필요한 커맨드 블록 제거"""
-        self._log("\n=== Step 3: CDB text cleanup ===")
-
-        out_dir = self.output_dir.get()
-        src = os.path.join(out_dir, "clean_model.cdb")
-        dst = os.path.join(out_dir, "clean_model_trimmed.cdb")
-
-        remove_blocks = [
-            line.strip()
-            for line in self.txt_blocks.get("1.0", "end").splitlines()
-            if line.strip()
-        ]
-
-        if not remove_blocks:
-            self._log("No blocks to remove, copying as-is.")
-            shutil.copy(src, dst)
-            return dst
-
-        self._log(f"Removing blocks starting with: {remove_blocks}")
-
-        with open(src, "r") as f:
-            lines = f.readlines()
-
-        def _line_matches(stripped_upper, patterns):
-            for pat in patterns:
-                pU = pat.upper()
-                if stripped_upper == pU:
-                    return True
-                if stripped_upper.startswith(pU + ","):
-                    return True
-                if stripped_upper.startswith(pU + " "):
-                    return True
-            return False
-
-        out_lines = []
-        skip = False
-        removed_count = 0
-
-        for line in lines:
-            stripped = line.strip()
-            stripped_upper = stripped.upper()
-            if _line_matches(stripped_upper, remove_blocks):
-                skip = True
-                removed_count += 1
-                continue
-            # 새 블록 시작 시 (들여쓰기 없는 비어있지 않은 줄) skip 해제
-            if skip and stripped and not line[0].isspace():
-                skip = False
-            if not skip:
-                out_lines.append(line)
-
-        with open(dst, "w") as f:
-            f.writelines(out_lines)
-
-        self._log(f"Removed {removed_count} block(s). Saved: {dst}")
-        return dst
-
     def _expand_etblock(self, cdb_path):
         """Replace every ETBLOCK block in a .cdb with ET/KEYOPT cards.
 
@@ -1058,15 +955,6 @@ class ConverterApp:
             with open(cdb_path, "w") as f:
                 f.writelines(out_lines)
         return changed
-
-    def _step3_5_extra(self, cdb_path):
-        """Placeholder stage between Step 3 and Step 4.
-
-        Additional CDB/INP adjustments will be defined here later.
-        For now this is a no-op that returns the input CDB path unchanged.
-        """
-        self._log("\n=== Step 3.5: (placeholder - to be configured later) ===")
-        return cdb_path
 
     def _step4_convert(self, cdb_path):
         """CDB를 직접 파싱해서 Abaqus INP 템플릿 생성"""
