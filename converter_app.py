@@ -439,6 +439,25 @@ class ConverterApp:
                     return ids
         return []
 
+    def _iter_selected_element_ids(self, mapdl, max_iter=10000000):
+        """Return currently selected element IDs using APDL *GET NXTH traversal.
+
+        This is more reliable than `mapdl.mesh.enum` for some sessions where
+        mesh caches can lag behind selection state.
+        """
+        ids = []
+        current = 0
+        for _ in range(max_iter):
+            try:
+                nxt = int(mapdl.get("_ENEXT", "ELEM", current, "NUM", "NXTH"))
+            except Exception:
+                break
+            if nxt <= 0 or nxt == current:
+                break
+            ids.append(nxt)
+            current = nxt
+        return ids
+
     def _get_component_element_ids(self, mapdl, candidates):
         existing = {name.upper(): name for name in self._list_all_components(mapdl)}
         target = None
@@ -448,43 +467,51 @@ class ConverterApp:
                 break
         if not target:
             return []
+
         try:
             ctype = self._get_component_type(mapdl, target)
+
+            # allsel 누락/잔여 선택 영향 최소화를 위해 항상 초기화 후 수행
+            mapdl.allsel("ALL")
+
             if ctype in {"ELEM", "ELEMENT"}:
-                mapdl.allsel("ALL")
                 mapdl.cmsel("S", target, "ELEM")
-                eids = [int(v) for v in mapdl.mesh.enum.tolist()]
-                return sorted(set(eids))
+                return sorted(set(self._iter_selected_element_ids(mapdl)))
+
             if ctype == "NODE":
-                mapdl.allsel("ALL")
                 mapdl.cmsel("S", target, "NODE")
                 try:
                     mapdl.esln("S")
                 except Exception:
                     pass
-                eids = [int(v) for v in mapdl.mesh.enum.tolist()]
-                return sorted(set(eids))
+                return sorted(set(self._iter_selected_element_ids(mapdl)))
+
             # Unknown 타입 fallback: NODE->ESLN 후 ELEM direct 순서로 시도
-            mapdl.allsel("ALL")
             mapdl.cmsel("S", target, "NODE")
             try:
                 mapdl.esln("S")
             except Exception:
                 pass
-            eids = [int(v) for v in mapdl.mesh.enum.tolist()]
+            eids = self._iter_selected_element_ids(mapdl)
             if eids:
                 return sorted(set(eids))
+
             mapdl.allsel("ALL")
             mapdl.cmsel("S", target, "ELEM")
-            eids = [int(v) for v in mapdl.mesh.enum.tolist()]
+            eids = self._iter_selected_element_ids(mapdl)
             if eids:
                 return sorted(set(eids))
+
             mapdl.allsel("ALL")
             mapdl.cmsel("S", target)
-            eids = [int(v) for v in mapdl.mesh.enum.tolist()]
-            return sorted(set(eids))
+            return sorted(set(self._iter_selected_element_ids(mapdl)))
         except Exception:
             return []
+        finally:
+            try:
+                mapdl.allsel("ALL")
+            except Exception:
+                pass
 
     def _get_component_type(self, mapdl, target_name):
         """Return component entity type from CMLIST output (NODE/ELEM/...)."""
