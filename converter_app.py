@@ -347,6 +347,12 @@ class ConverterApp:
                     self._log(
                         f"  Expanded ETBLOCK -> {expanded} ET/KEYOPT card(s)."
                     )
+                rewritten = self._rewrite_mp_mpdata_to_classic(cdb_path)
+                if rewritten:
+                    self._log(
+                        f"  Rewrote {rewritten} MP/MPDATA line(s) to "
+                        f"classic format (abaqus fromansys compatible)."
+                    )
 
         finally:
             mapdl.exit()
@@ -829,6 +835,122 @@ class ConverterApp:
             with open(cdb_path, "w") as f:
                 f.writelines(out_lines)
         return expanded
+
+    # Subset of MAPDL material property labels that might appear in MP /
+    # MPDATA commands. Used to detect whether a line is in the blocked
+    # "version-tagged" form (the property label sits at position 3) or
+    # in the classic form (label at position 1).
+    _MP_LABELS = frozenset({
+        "EX", "EY", "EZ", "GXY", "GYZ", "GXZ",
+        "NUXY", "NUYZ", "NUXZ", "PRXY", "PRYZ", "PRXZ",
+        "DENS", "ALPX", "ALPY", "ALPZ", "CTEX", "CTEY", "CTEZ",
+        "KXX", "KYY", "KZZ", "C", "ENTH", "HF", "EMIS",
+        "VISC", "SONC", "MU", "DMPR", "DMPS",
+        "MURX", "MURY", "MURZ", "MGXX", "MGYY", "MGZZ",
+        "RSVX", "RSVY", "RSVZ", "PERX", "PERY", "PERZ",
+        "LSST", "BETD", "REFT",
+    })
+
+    def _rewrite_mp_mpdata_to_classic(self, cdb_path):
+        """Convert MP / MPDATA lines back to the classic comma-separated
+        form that `abaqus fromansys` understands.
+
+        Modern MAPDL CDWRITE (BLOCKED) emits material commands with a
+        release/version tag inserted before the material number:
+
+            MPDATA,R5.0, 1,EX  ,         0, 2.10000000000E+11,
+            MP    ,R5.0, 1,DENS,  7.85000E+03
+
+        abaqus fromansys, however, parses the classic grammar where the
+        property label sits right after the command:
+
+            MPDATA,EX,1,0,2.10000000000E+11
+            MP,DENS,1,7.85E+03
+
+        When fromansys reads the blocked form it treats the version tag
+        ("R5.0" or similar) as the label, emits hundreds of
+        "Material Property <tag> not supported" warnings, and the
+        resulting .inp has no materials at all.
+
+        This rewriter walks each line and, for MP / MPDATA, checks
+        whether the *third* whitespace/comma-separated token is a known
+        MP label while the *first* token is not. In that case it
+        reorders the fields into the classic form. Lines that already
+        look classic, or that we cannot confidently identify, are
+        passed through untouched so we do not corrupt unrelated data.
+        The file is rewritten in place and the number of converted
+        lines is returned.
+        """
+        try:
+            with open(cdb_path, "r") as f:
+                lines = f.readlines()
+        except (FileNotFoundError, OSError):
+            return 0
+
+        def _split_csv(payload):
+            return [tok.strip() for tok in payload.split(",")]
+
+        changed = 0
+        out_lines = []
+        for line in lines:
+            stripped = line.lstrip()
+            upper = stripped.upper()
+            matched_cmd = None
+            for cmd in ("MPDATA", "MP"):
+                if upper.startswith(cmd + ",") or upper.startswith(cmd + " "):
+                    matched_cmd = cmd
+                    break
+                if upper.rstrip() == cmd:
+                    matched_cmd = cmd
+                    break
+                # MAPDL pads command names with spaces (e.g. "MP    ,").
+                head = upper[: len(cmd)]
+                tail = upper[len(cmd) :].lstrip()
+                if head == cmd and tail.startswith(","):
+                    matched_cmd = cmd
+                    break
+            if matched_cmd is None:
+                out_lines.append(line)
+                continue
+
+            # Split off the command, keep the rest as the argument list.
+            comma = stripped.find(",")
+            if comma < 0:
+                out_lines.append(line)
+                continue
+            payload = stripped[comma + 1 :].rstrip("\n")
+            tokens = _split_csv(payload)
+            if len(tokens) < 3:
+                out_lines.append(line)
+                continue
+
+            tok0_upper = tokens[0].upper()
+            tok2_upper = tokens[2].upper() if len(tokens) > 2 else ""
+
+            classic_ok = tok0_upper in self._MP_LABELS
+            blocked_ok = (
+                tok0_upper not in self._MP_LABELS
+                and tok2_upper in self._MP_LABELS
+            )
+
+            if classic_ok or not blocked_ok:
+                out_lines.append(line)
+                continue
+
+            # Blocked form detected: tokens = [tag, mat, lab, rest...]
+            tag, mat, lab, *rest = tokens
+            # Drop trailing empty fields that MAPDL likes to pad with.
+            while rest and rest[-1] == "":
+                rest.pop()
+            new_tokens = [lab, mat, *rest]
+            new_line = f"{matched_cmd}," + ",".join(new_tokens) + "\n"
+            out_lines.append(new_line)
+            changed += 1
+
+        if changed:
+            with open(cdb_path, "w") as f:
+                f.writelines(out_lines)
+        return changed
 
     def _step3_5_extra(self, cdb_path):
         """Placeholder stage between Step 3 and Step 4.
