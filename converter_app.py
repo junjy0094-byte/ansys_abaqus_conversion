@@ -396,14 +396,21 @@ class ConverterApp:
         )
 
         # 일부 모델에서는 컴포넌트명이 규칙에서 살짝 벗어나거나(예: 접두/접미)
-        # 슬레이브만 이름이 달라서 누락될 수 있다. 이름 패턴 기반으로 한 번 더 보강.
+        # master/slave 이름이 달라서 누락될 수 있다. 이름 패턴 기반으로 한 번 더
+        # 보강 — 1) MASTER+TIE 동시 매칭, 2) MASTER 만 포함 매칭 순서로 시도.
         if not master:
-            auto_master = self._get_component_element_ids_by_keywords(mapdl, include=("MASTER", "TIE"))
+            auto_master = (
+                self._get_component_element_ids_by_keywords(mapdl, include=("MASTER", "TIE"))
+                or self._get_component_element_ids_by_keywords(mapdl, include=("MASTER",))
+            )
             if auto_master:
                 master = auto_master
                 self._log(f"  tie master fallback by name pattern: {len(master)} element(s)")
         if not slave:
-            auto_slave = self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE", "TIE"))
+            auto_slave = (
+                self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE", "TIE"))
+                or self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE",))
+            )
             if auto_slave:
                 slave = auto_slave
                 self._log(f"  tie slave fallback by name pattern: {len(slave)} element(s)")
@@ -645,11 +652,17 @@ class ConverterApp:
             created_cms.add("TIE_MASTER")
             self._log(f"  Created CM TIE_MASTER ({len(master_nodes)} nodes -> ELEM component)")
 
-        # CE 기반 slave 노드가 파일럿 노드인 경우 ESLN 결과가 0개일 수 있다.
-        # 이때는 기존 slave/tie 성분에서 element 기반으로 재구성 시도.
+        # CE 기반 slave/master 노드가 파일럿 노드인 경우 ESLN 결과가 0개일 수
+        # 있고, 그 외에도 user 모델이 surface-based tie(CONTA174/TARGE170)
+        # 만 가지고 있어 CE 자체가 없는 경우도 있다. 이럴 때는 기존
+        # element component 중 이름에 SLAVE / MASTER 가 포함된 것을 찾아
+        # TIE_SLAVE / TIE_MASTER 로 재구성한다.
         tie_slave_eids = self._get_component_element_ids(mapdl, ["TIE_SLAVE"])
         if not tie_slave_eids:
-            alt_slave_eids = self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE", "TIE"))
+            alt_slave_eids = (
+                self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE", "TIE"))
+                or self._get_component_element_ids_by_keywords(mapdl, include=("SLAVE",))
+            )
             if alt_slave_eids and self._create_cm_from_element_list(mapdl, "TIE_SLAVE", alt_slave_eids):
                 created_cms.add("TIE_SLAVE")
                 self._log(
@@ -657,11 +670,12 @@ class ConverterApp:
                     f"({len(alt_slave_eids)} elements)"
                 )
 
-        # master 측도 동일하게 보강: CE 파싱 실패·파일럿 노드·ESLN 0개 등으로
-        # TIE_MASTER가 비어 있으면 기존 *MASTER*TIE* element 성분에서 재구성.
         tie_master_eids = self._get_component_element_ids(mapdl, ["TIE_MASTER"])
         if not tie_master_eids:
-            alt_master_eids = self._get_component_element_ids_by_keywords(mapdl, include=("MASTER", "TIE"))
+            alt_master_eids = (
+                self._get_component_element_ids_by_keywords(mapdl, include=("MASTER", "TIE"))
+                or self._get_component_element_ids_by_keywords(mapdl, include=("MASTER",))
+            )
             if alt_master_eids and self._create_cm_from_element_list(mapdl, "TIE_MASTER", alt_master_eids):
                 created_cms.add("TIE_MASTER")
                 self._log(
@@ -680,8 +694,11 @@ class ConverterApp:
             if name.upper() in created_cms:
                 continue
             up = name.upper()
-            # 기존 tie 관련 컴포넌트는 보존 (이름이 다르면 후속 파싱에서 필요할 수 있음)
-            if ("TIE" in up and "SLAVE" in up) or ("TIE" in up and "MASTER" in up):
+            # 기존 tie/master/slave 관련 컴포넌트는 모두 보존.
+            # 이름이 "MASTER" 단독이거나 "CONTACT_MASTER" 처럼 TIE 키워드가
+            # 없는 경우에도 후속 step에서 master_tie / slave_tie 로 활용해야
+            # 하므로 폭넓게 남겨둔다.
+            if "TIE" in up or "MASTER" in up or "SLAVE" in up:
                 continue
             try:
                 mapdl.cmdele(name)
@@ -1310,7 +1327,16 @@ class ConverterApp:
         return elems_by_mat
 
     def _parse_cdb_nsets(self, cdb_path):
-        """Parse NODE CMBLOCKs and return {name_lower: [node_ids]}."""
+        """Parse CMBLOCKs (NODE and ELEM) and return {name_lower: [ids]}.
+
+        CMBLOCK 형식:
+            CMBLOCK,Cname,Entity,NUMITEMS,KOPT
+            (8i10)
+                  id1       id2 ...
+
+        ``NUMITEMS`` 만큼만 읽고, 다음 CMBLOCK / 명령을 만나면 멈춘다.
+        ELEM type CMBLOCK 도 동일하게 element id 리스트로 보관한다.
+        """
         with open(cdb_path, "r") as f:
             lines = f.readlines()
 
@@ -1325,31 +1351,48 @@ class ConverterApp:
                 continue
 
             parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 3:
+            if len(parts) < 4:
                 i += 1
                 continue
             name = parts[1]
             ent_type = parts[2].upper()
+            try:
+                num_items = int(parts[3])
+            except ValueError:
+                num_items = 0
             i += 1
+            # 포맷 라인 (예: "(8i10)") 한 줄 건너뛰기
             if i < n and lines[i].lstrip().startswith("("):
                 i += 1
-            if ent_type != "NODE":
-                while i < n and not lines[i].strip().startswith("-1"):
-                    i += 1
-                i += 1
+            if ent_type not in {"NODE", "ELEM", "ELEMENT"}:
+                # 알 수 없는 타입은 헤더만 건너뛰고 다음으로
                 continue
 
-            node_ids = []
-            while i < n:
+            ids = []
+            while i < n and len(ids) < num_items:
                 s = lines[i].strip()
-                if s.startswith("-1"):
+                if not s:
                     i += 1
+                    continue
+                # 다음 명령/블록을 만나면 멈춘다 (CMBLOCK, NBLOCK, EBLOCK,
+                # /COM, ! 주석 등). 데이터 라인은 숫자(또는 부호+숫자)로 시작.
+                if not re.match(r"^[\s\-+0-9]", lines[i]):
                     break
-                if s:
-                    node_ids.extend(int(x) for x in int_pat.findall(s) if int(x) > 0)
+                tokens = int_pat.findall(s)
+                if not tokens:
+                    break
+                for tok in tokens:
+                    try:
+                        v = int(tok)
+                    except ValueError:
+                        continue
+                    if v > 0:
+                        ids.append(v)
+                    if len(ids) >= num_items:
+                        break
                 i += 1
-            if node_ids:
-                nsets[name.lower()] = sorted(set(node_ids))
+            if ids:
+                nsets[name.lower()] = sorted(set(ids))
         return nsets
 
     def _read_nsets_txt(self, nset_path):
