@@ -422,8 +422,8 @@ class ConverterApp:
             )[0]
             bc_all = [best]
 
-        master = self._get_component_node_ids(mapdl, ["MASTER_TIE", "TIE_MASTER", "master_tie"])
-        slave = self._get_component_node_ids(mapdl, ["SLAVE_TIE", "TIE_SLAVE", "slave_tie"])
+        master = self._get_component_node_ids(mapdl, ["TIE_MASTER", "tie_master", "MASTER_TIE", "master_tie"])
+        slave = self._get_component_node_ids(mapdl, ["TIE_SLAVE", "tie_slave", "SLAVE_TIE", "slave_tie"])
         mapdl.allsel("ALL")
 
         return {
@@ -485,12 +485,12 @@ class ConverterApp:
         # CELIST 파싱 실패 시 기존 컴포넌트명에서 fallback
         if not slave_nodes and not master_nodes:
             existing = [n.upper() for n in self._list_all_components(mapdl)]
-            if "SLAVE_TIE" in existing:
-                slave_nodes.update(self._get_component_node_ids(mapdl, ["SLAVE_TIE"]))
-            if "MASTER_TIE" in existing:
-                master_nodes.update(self._get_component_node_ids(mapdl, ["MASTER_TIE"]))
+            if "TIE_SLAVE" in existing or "SLAVE_TIE" in existing:
+                slave_nodes.update(self._get_component_node_ids(mapdl, ["TIE_SLAVE", "SLAVE_TIE", "tie_slave"]))
+            if "TIE_MASTER" in existing or "MASTER_TIE" in existing:
+                master_nodes.update(self._get_component_node_ids(mapdl, ["TIE_MASTER", "MASTER_TIE", "tie_master"]))
             if slave_nodes or master_nodes:
-                self._log("  Fallback: reused existing MASTER_TIE/SLAVE_TIE components.")
+                self._log("  Fallback: reused existing TIE_MASTER/TIE_SLAVE components.")
 
         created_cms = set()
 
@@ -1365,6 +1365,14 @@ class ConverterApp:
             for ns in required_nsets:
                 f.write(f"*NSET, NSET={ns}\n")
                 ids = nsets.get(ns, [])
+                if not ids:
+                    alias_map = {
+                        "master_tie": "tie_master",
+                        "slave_tie": "tie_slave",
+                    }
+                    alias = alias_map.get(ns)
+                    if alias:
+                        ids = nsets.get(alias, [])
                 for k in range(0, len(ids), 16):
                     f.write(", ".join(str(v) for v in ids[k:k + 16]) + "\n")
                 if not ids:
