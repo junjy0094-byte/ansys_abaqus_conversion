@@ -77,9 +77,17 @@ class ConverterApp:
         frm_blk = tk.LabelFrame(self.root, text="Step 3 - CDB Command Blocks to Remove (one per line)", padx=10, pady=5)
         frm_blk.pack(fill="x", padx=10, pady=5)
 
-        self.txt_blocks = tk.Text(frm_blk, height=5, width=80)
+        self.txt_blocks = tk.Text(frm_blk, height=12, width=80)
         self.txt_blocks.pack(fill="x")
-        self.txt_blocks.insert("1.0", "CECMOD\nCE\n/COM,ANSYS RELEASE")
+        default_cards = [
+            "/COM", "/TITLE", "DOF", "ANTYPE", "ACEL",
+            "CGLOC", "CGOMGA", "DCGOMG", "DOMEGA", "IRLF",
+            "OMEGA", "KUSE", "ALPHAD", "BETAD", "DMPRAT",
+            "CRPLIM", "NCNV", "ERESX", "TIME", "NEQIT",
+            "TREF", "BFUNIF", "TOFFST", "NUMOFF", "CECMOD",
+            "CE", "UnsupportedCard",
+        ]
+        self.txt_blocks.insert("1.0", "\n".join(default_cards))
 
         # --- Run ---
         frm_run = tk.Frame(self.root, pady=5)
@@ -144,6 +152,10 @@ class ConverterApp:
                 self._log("\n=== Stopped after Step 3 ===")
                 return
 
+            # Placeholder: additional CDB adjustments between Step 3 and Step 4.
+            # Details will be configured later.
+            cdb_path = self._step3_5_extra(cdb_path)
+
             self._step4_convert(cdb_path)
             self._log("\n=== All steps completed ===")
         except Exception as e:
@@ -203,6 +215,10 @@ class ConverterApp:
             tol = float(self.node_tol.get())
             mapdl.nummrg("NODE", tol)
 
+            # Contact/Tie 처리: slave/master CM 생성 → 기타 CM / contact / load 삭제
+            self._log("Processing contact/tie pairs and loads...")
+            self._handle_contacts_and_loads(mapdl)
+
             # 미사용 물성 삭제
             self._log("Removing unused material properties...")
             self._remove_unused_mats(mapdl)
@@ -229,6 +245,191 @@ class ConverterApp:
         finally:
             mapdl.exit()
             self._log("MAPDL closed.")
+
+    def _handle_contacts_and_loads(self, mapdl):
+        """Create CMs for each contact/tie pair's slave (CONTA) and master
+        (TARGE) nodes, delete all other components, then delete the
+        contact/tie elements and every applied load so that the exported
+        CDB contains only geometry, materials, and the preserved CMs."""
+        contact_enames = [171, 172, 173, 174, 175, 176, 177, 178]
+        target_enames = [169, 170]
+
+        mapdl.allsel("ALL")
+
+        # ── 1) contact/target 요소가 사용하는 REAL 번호 수집 ──
+        real_ids = set()
+        for ename in contact_enames + target_enames:
+            try:
+                mapdl.esel("S", "ENAME", "", ename)
+            except Exception:
+                continue
+            try:
+                n = int(mapdl.get("NE", "ELEM", "", "COUNT"))
+            except Exception:
+                n = 0
+            if n == 0:
+                continue
+            try:
+                max_enum = int(mapdl.get("MAXE", "ELEM", "", "NUM", "MAX"))
+            except Exception:
+                max_enum = 0
+            if max_enum <= 0:
+                continue
+            try:
+                mapdl.run(f"*DEL,_REALARR,,NOPR")
+            except Exception:
+                pass
+            try:
+                mapdl.run(f"*DIM,_REALARR,ARRAY,{max_enum}")
+                mapdl.run("*VGET,_REALARR(1),ELEM,1,ATTR,REAL")
+                arr = mapdl.parameters["_REALARR"].flatten()
+                real_ids.update(int(x) for x in arr if x > 0)
+            except Exception:
+                pass
+            finally:
+                try:
+                    mapdl.run("*DEL,_REALARR,,NOPR")
+                except Exception:
+                    pass
+
+        mapdl.allsel("ALL")
+        self._log(f"  Found {len(real_ids)} contact/tie pair(s).")
+
+        # ── 2) 각 pair별로 slave/master CM 생성 ──
+        created_cms = set()
+
+        def _esel_by_enames(enames):
+            first = True
+            for en in enames:
+                try:
+                    if first:
+                        mapdl.esel("S", "ENAME", "", en)
+                    else:
+                        mapdl.esel("A", "ENAME", "", en)
+                    first = False
+                except Exception:
+                    pass
+            return not first
+
+        for rid in sorted(real_ids):
+            # Slave: CONTA elements
+            mapdl.allsel("ALL")
+            if _esel_by_enames(contact_enames):
+                try:
+                    mapdl.esel("R", "REAL", "", rid)
+                    n = int(mapdl.get("NE", "ELEM", "", "COUNT"))
+                except Exception:
+                    n = 0
+                if n > 0:
+                    mapdl.nsle()
+                    cm_name = f"SLAVE_R{rid}"
+                    try:
+                        mapdl.cm(cm_name, "NODE")
+                        created_cms.add(cm_name.upper())
+                        self._log(f"  Created CM {cm_name} ({n} contact elements)")
+                    except Exception as e:
+                        self._log(f"  Warning: could not create {cm_name}: {e}")
+
+            # Master: TARGE elements
+            mapdl.allsel("ALL")
+            if _esel_by_enames(target_enames):
+                try:
+                    mapdl.esel("R", "REAL", "", rid)
+                    n = int(mapdl.get("NE", "ELEM", "", "COUNT"))
+                except Exception:
+                    n = 0
+                if n > 0:
+                    mapdl.nsle()
+                    cm_name = f"MASTER_R{rid}"
+                    try:
+                        mapdl.cm(cm_name, "NODE")
+                        created_cms.add(cm_name.upper())
+                        self._log(f"  Created CM {cm_name} ({n} target elements)")
+                    except Exception as e:
+                        self._log(f"  Warning: could not create {cm_name}: {e}")
+
+        mapdl.allsel("ALL")
+
+        # ── 3) 보존 대상(SLAVE_*/MASTER_*)을 제외한 나머지 CM 모두 삭제 ──
+        existing_cms = self._list_all_components(mapdl)
+        deleted_cm = 0
+        for name in existing_cms:
+            if name.upper() in created_cms:
+                continue
+            try:
+                mapdl.cmdele(name)
+                deleted_cm += 1
+            except Exception:
+                pass
+        self._log(f"  Deleted {deleted_cm} non-contact component(s).")
+
+        # ── 4) contact/tie 요소 삭제 ──
+        mapdl.allsel("ALL")
+        deleted_elems = 0
+        for ename in contact_enames + target_enames:
+            try:
+                mapdl.esel("S", "ENAME", "", ename)
+                n = int(mapdl.get("NE", "ELEM", "", "COUNT"))
+                if n > 0:
+                    mapdl.edele("ALL")
+                    deleted_elems += n
+            except Exception:
+                pass
+        mapdl.allsel("ALL")
+        self._log(f"  Deleted {deleted_elems} contact/tie element(s).")
+
+        # ── 5) 모든 하중/경계조건 삭제 ──
+        load_cmds = [
+            ("fdele", ("ALL", "ALL")),         # nodal forces
+            ("ddele", ("ALL", "ALL")),         # nodal DOF constraints
+            ("sfedele", ("ALL", "ALL", "ALL")),  # element surface loads
+            ("sfdele", ("ALL", "ALL")),        # nodal surface loads
+            ("bfdele", ("ALL", "ALL")),        # nodal body forces
+            ("bfedele", ("ALL", "ALL", "ALL")),  # element body forces
+        ]
+        for cmd_name, args in load_cmds:
+            try:
+                getattr(mapdl, cmd_name)(*args)
+            except Exception:
+                pass
+        self._log("  Deleted all applied loads/BCs.")
+
+    def _list_all_components(self, mapdl):
+        """Return a list of every currently defined component name."""
+        # Prefer PyMAPDL's component manager when available
+        try:
+            comp = getattr(mapdl, "components", None)
+            if comp is not None:
+                names = list(comp.names)
+                if names:
+                    return names
+        except Exception:
+            pass
+
+        # Fallback: dump CMLIST via macro and parse names
+        macro_path = os.path.join(mapdl.directory, "_dump_cmlist.mac")
+        try:
+            with open(macro_path, "w") as f:
+                f.write("/OUTPUT,_cmlist,txt\n")
+                f.write("CMLIST\n")
+                f.write("/OUTPUT\n")
+            mapdl.input(macro_path)
+        except Exception:
+            return []
+
+        cmlist_path = os.path.join(mapdl.directory, "_cmlist.txt")
+        names = []
+        valid_types = {"NODE", "ELEM", "ELEMENT", "KP", "LINE", "AREA", "VOLU"}
+        try:
+            with open(cmlist_path, "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", parts[0]):
+                        if parts[1].upper() in valid_types:
+                            names.append(parts[0])
+        except FileNotFoundError:
+            pass
+        return names
 
     def _remove_unused_mats(self, mapdl):
         """미사용 물성 찾아서 삭제 — MPLIST 파일 파싱 방식"""
@@ -315,13 +516,25 @@ class ConverterApp:
         with open(src, "r") as f:
             lines = f.readlines()
 
+        def _line_matches(stripped_upper, patterns):
+            for pat in patterns:
+                pU = pat.upper()
+                if stripped_upper == pU:
+                    return True
+                if stripped_upper.startswith(pU + ","):
+                    return True
+                if stripped_upper.startswith(pU + " "):
+                    return True
+            return False
+
         out_lines = []
         skip = False
         removed_count = 0
 
         for line in lines:
             stripped = line.strip()
-            if any(stripped.startswith(b) for b in remove_blocks):
+            stripped_upper = stripped.upper()
+            if _line_matches(stripped_upper, remove_blocks):
                 skip = True
                 removed_count += 1
                 continue
@@ -336,6 +549,15 @@ class ConverterApp:
 
         self._log(f"Removed {removed_count} block(s). Saved: {dst}")
         return dst
+
+    def _step3_5_extra(self, cdb_path):
+        """Placeholder stage between Step 3 and Step 4.
+
+        Additional CDB/INP adjustments will be defined here later.
+        For now this is a no-op that returns the input CDB path unchanged.
+        """
+        self._log("\n=== Step 3.5: (placeholder - to be configured later) ===")
+        return cdb_path
 
     def _step4_convert(self, cdb_path):
         """abaqus fromansys 실행"""
