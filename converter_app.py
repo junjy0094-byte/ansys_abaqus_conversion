@@ -1299,7 +1299,13 @@ class ConverterApp:
         self._log("\n=== Step 4: direct text INP build (no fromansys) ===")
 
         out_dir = self.output_dir.get()
-        inp_path = os.path.join(out_dir, "converted_model.inp")
+        db_src = self.db_path.get()
+        inp_stem = (
+            os.path.splitext(os.path.basename(db_src))[0]
+            if db_src
+            else "converted_model"
+        )
+        inp_path = os.path.join(out_dir, f"{inp_stem}.inp")
 
         nodes = self._parse_cdb_nodes(cdb_path)
         elems_by_mat = self._parse_cdb_elements_by_mat(cdb_path)
