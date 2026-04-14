@@ -1345,7 +1345,6 @@ class ConverterApp:
         in_nblock = False
         skip_format = False
         num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[DdEe][-+]?\d+)?")
-        int_pat = re.compile(r"[-+]?\d+")
 
         for raw in lines:
             s = raw.strip()
@@ -1365,33 +1364,47 @@ class ConverterApp:
             if not s:
                 continue
 
-            # NBLOCK은 고정폭 형식이므로 먼저 fixed-width 파싱을 시도한다.
-            # 일반적으로 앞 9자리 정수 필드에 node id가 있고, 뒤쪽 3개 실수
-            # 필드가 X/Y/Z 좌표다.
+            # NBLOCK (예: (3i9,6e21.13e3)) 데이터 라인 파싱:
+            # - 앞 3개 정수 필드(각 9자리): NODE, 0, 0
+            # - 뒤 실수 필드(각 21자리): X, Y, Z ... (생략되면 0으로 간주)
+            # 좌표 필드 사이 공백이 없더라도 21자리 고정폭으로 절단해 읽는다.
             nid = None
-            x = y = z = None
-            if len(raw) >= 69:
+            coords = [0.0, 0.0, 0.0]
+            if len(raw) >= 9:
                 try:
                     nid = int(raw[0:9].strip())
-                    x = float(raw[-60:-40].strip().replace("D", "E").replace("d", "e"))
-                    y = float(raw[-40:-20].strip().replace("D", "E").replace("d", "e"))
-                    z = float(raw[-20:].strip().replace("D", "E").replace("d", "e"))
                 except ValueError:
                     nid = None
 
-            # fixed-width가 실패하면 기존 regex 파싱으로 fallback.
-            if nid is None:
-                ints = int_pat.findall(s)
-                nums = num_pat.findall(s)
-                if not ints or len(nums) < 4:
-                    continue
-                try:
-                    nid = int(ints[0])
-                    parsed = [float(v.replace("D", "E").replace("d", "e")) for v in nums[-3:]]
-                    x, y, z = parsed[0], parsed[1], parsed[2]
-                except ValueError:
-                    continue
-            nodes[nid] = (x, y, z)
+            if nid is not None:
+                tail = raw[27:]
+                vals = []
+                # tail 부분에서만 숫자를 추출하면
+                # 1) 좌표 사이 공백 유무와 무관하고
+                # 2) 누락된 좌표는 자동으로 0.0 유지된다.
+                for tok in num_pat.findall(tail):
+                    try:
+                        vals.append(float(tok.replace("D", "E").replace("d", "e")))
+                    except ValueError:
+                        pass
+                    if len(vals) >= 3:
+                        break
+                # 예외적으로 regex가 비면, 21자리 고정폭으로 한 번 더 시도.
+                if not vals:
+                    for idx in range(3):
+                        seg = tail[idx * 21:(idx + 1) * 21]
+                        if not seg:
+                            break
+                        val = seg.strip()
+                        if not val:
+                            continue
+                        try:
+                            vals.append(float(val.replace("D", "E").replace("d", "e")))
+                        except ValueError:
+                            continue
+                for idx, v in enumerate(vals[:3]):
+                    coords[idx] = v
+                nodes[nid] = (coords[0], coords[1], coords[2])
         return nodes
 
     def _parse_cdb_elements_by_mat(self, cdb_path):
