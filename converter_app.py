@@ -1343,68 +1343,101 @@ class ConverterApp:
 
         nodes = {}
         in_nblock = False
-        skip_format = False
-        num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[DdEe][-+]?\d+)?")
+        int_count = 3
+        int_width = 9
+        float_width = 21
+        real_pat = re.compile(
+            r"[-+]?(?:\d+\.\d*|\.\d+|\d+[DdEe][-+]?\d+)(?:[DdEe][-+]?\d+)?"
+        )
+        fmt_int = re.compile(r"(\d+)\s*[iI]\s*(\d+)")
+        fmt_real = re.compile(r"(\d+)\s*[eEdD]\s*(\d+)")
+        malformed_nids = []
 
         for raw in lines:
             s = raw.strip()
             u = s.upper()
             if not in_nblock and u.startswith("NBLOCK"):
                 in_nblock = True
-                skip_format = True
+                # 기본 NBLOCK 포맷은 (3i9,6e21.13e3)이지만
+                # 모델/버전별로 앞쪽 integer field 개수가 달라질 수 있다.
+                # 다음 포맷 라인에서 i/e field 폭을 읽어 좌표 시작 위치를 동적으로 계산.
                 continue
             if not in_nblock:
                 continue
-            if skip_format:
-                skip_format = False
+
+            if s.startswith("("):
+                m_int = fmt_int.search(s)
+                if m_int:
+                    int_count = int(m_int.group(1))
+                    int_width = int(m_int.group(2))
+                m_real = fmt_real.search(s)
+                if m_real:
+                    float_width = int(m_real.group(2))
                 continue
+
             if s.startswith("-1"):
                 in_nblock = False
                 continue
             if not s:
                 continue
 
-            # NBLOCK (예: (3i9,6e21.13e3)) 데이터 라인 파싱:
-            # - 앞 3개 정수 필드(각 9자리): NODE, 0, 0
-            # - 뒤 실수 필드(각 21자리): X, Y, Z ... (생략되면 0으로 간주)
-            # 좌표 필드 사이 공백이 없더라도 21자리 고정폭으로 절단해 읽는다.
             nid = None
-            coords = [0.0, 0.0, 0.0]
-            if len(raw) >= 9:
+            if len(raw) >= int_width:
                 try:
-                    nid = int(raw[0:9].strip())
+                    nid = int(raw[0:int_width].strip())
                 except ValueError:
                     nid = None
 
             if nid is not None:
-                tail = raw[27:]
+                tail = raw[int_count * int_width:]
                 vals = []
-                # tail 부분에서만 숫자를 추출하면
-                # 1) 좌표 사이 공백 유무와 무관하고
-                # 2) 누락된 좌표는 자동으로 0.0 유지된다.
-                for tok in num_pat.findall(tail):
+                fixed_ok = True
+                # 고정폭 우선 파싱: integer 필드 숫자(예: 1,1,0)가
+                # 좌표로 오인되는 문제를 피한다.
+                for idx in range(3):
+                    a = idx * float_width
+                    b = (idx + 1) * float_width
+                    seg = tail[a:b]
+                    # NBLOCK 고정폭에서 좌표 필드가 빈칸이면 0.0으로 간주한다.
+                    # (일부 CDB는 trailing zero field를 공백으로 내보냄)
+                    if not seg:
+                        vals.append(0.0)
+                        continue
+                    val = seg.strip()
+                    if not val:
+                        vals.append(0.0)
+                        continue
                     try:
-                        vals.append(float(tok.replace("D", "E").replace("d", "e")))
+                        vals.append(float(val.replace("D", "E").replace("d", "e")))
                     except ValueError:
-                        pass
-                    if len(vals) >= 3:
+                        fixed_ok = False
                         break
-                # 예외적으로 regex가 비면, 21자리 고정폭으로 한 번 더 시도.
-                if not vals:
-                    for idx in range(3):
-                        seg = tail[idx * 21:(idx + 1) * 21]
-                        if not seg:
-                            break
-                        val = seg.strip()
-                        if not val:
-                            continue
+
+                # 고정폭 파싱이 실패하면 regex fallback.
+                if not fixed_ok:
+                    vals = []
+                    for tok in real_pat.findall(tail):
                         try:
-                            vals.append(float(val.replace("D", "E").replace("d", "e")))
+                            vals.append(float(tok.replace("D", "E").replace("d", "e")))
                         except ValueError:
-                            continue
-                for idx, v in enumerate(vals[:3]):
-                    coords[idx] = v
-                nodes[nid] = (coords[0], coords[1], coords[2])
+                            pass
+                        if len(vals) >= 3:
+                            break
+
+                # 고정폭/regex 모두 실패해서 좌표 3개를 못 읽은 행만 스킵.
+                if len(vals) < 3:
+                    malformed_nids.append(nid)
+                    continue
+                nodes[nid] = (vals[0], vals[1], vals[2])
+
+        if malformed_nids:
+            sample = ", ".join(str(v) for v in malformed_nids[:8])
+            more = "" if len(malformed_nids) <= 8 else ", ..."
+            self._log(
+                "Warning: skipped malformed NBLOCK node row(s) with unreadable "
+                f"XYZ fields: {len(malformed_nids)} node(s) "
+                f"(sample: {sample}{more})"
+            )
         return nodes
 
     def _parse_cdb_elements_by_mat(self, cdb_path):
@@ -1861,7 +1894,7 @@ class ConverterApp:
             f.write("*NODE\n")
             for nid in sorted(nodes):
                 x, y, z = nodes[nid]
-                f.write(f"{nid}, {x:.9g}, {y:.9g}, {z:.9g}\n")
+                f.write(f"{nid}, {x:.12g}, {y:.12g}, {z:.12g}\n")
 
             for mid in mat_ids:
                 es = f"eset{mid}"
