@@ -2048,7 +2048,7 @@ class ConverterApp:
                             f.write(f"{self._fmt_num(a)}\n")
 
             f.write("*TIE, NAME=tie-1\n")
-            f.write("master_tie, slave_tie\n")
+            f.write("slave_tie, master_tie\n")
             f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
             f.write("NSET_TEMPERATURE,183.0\n")
             f.write("*STEP, INC=10000, NAME=step, NLGEOM=NO\n")
@@ -2060,6 +2060,7 @@ class ConverterApp:
             f.write("NSET_BC_Y,YSYMM\n")
             f.write("NSET_BC_X,XSYMM\n")
             f.write("NSET_BC_ALL,3,,0\n")
+            f.write("*END STEP\n")
 
 
 if __name__ == "__main__":
