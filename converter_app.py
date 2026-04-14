@@ -1322,9 +1322,12 @@ class ConverterApp:
         if not elems_by_mat:
             raise RuntimeError("EBLOCK에서 요소를 읽지 못했습니다.")
 
+        self._log_node_stats(nodes, label="NBLOCK raw")
+
         # Abaqus 입력 전 길이 스케일 보정 (x1000)
         nodes = self._scale_nodes(nodes, 1000.0)
         self._log("Applied coordinate scale-up: x1000")
+        self._log_node_stats(nodes, label="NBLOCK scaled")
 
         self._write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info)
         self._log(f"INP created: {inp_path}")
@@ -1341,8 +1344,6 @@ class ConverterApp:
         nodes = {}
         in_nblock = False
         skip_format = False
-        num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?")
-        int_pat = re.compile(r"[-+]?\d+")
 
         for raw in lines:
             s = raw.strip()
@@ -1362,17 +1363,52 @@ class ConverterApp:
             if not s:
                 continue
 
-            ints = int_pat.findall(s)
-            nums = num_pat.findall(s)
-            if not ints or len(nums) < 4:
+            # MAPDL CDB may use Fortran D exponent (e.g. 1.23D+03).
+            # Split-based parsing is more robust than mixed regex extraction
+            # for fixed-width NBLOCK rows.
+            parts = s.replace("D", "E").replace("d", "E").split()
+            if len(parts) < 4:
                 continue
             try:
-                nid = int(ints[0])
-                x, y, z = float(nums[-3]), float(nums[-2]), float(nums[-1])
+                nid = int(parts[0])
+                x, y, z = float(parts[-3]), float(parts[-2]), float(parts[-1])
             except ValueError:
                 continue
             nodes[nid] = (x, y, z)
         return nodes
+
+    def _log_node_stats(self, nodes, label):
+        """Log coordinate diagnostics to detect suspicious outliers quickly."""
+        if not nodes:
+            self._log(f"{label}: no nodes")
+            return
+        xs = [xyz[0] for xyz in nodes.values()]
+        ys = [xyz[1] for xyz in nodes.values()]
+        zs = [xyz[2] for xyz in nodes.values()]
+
+        def _fmt(v):
+            return f"{v:.6g}"
+
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        min_z, max_z = min(zs), max(zs)
+        self._log(
+            f"{label}: count={len(nodes)} "
+            f"X[{_fmt(min_x)}, {_fmt(max_x)}] "
+            f"Y[{_fmt(min_y)}, {_fmt(max_y)}] "
+            f"Z[{_fmt(min_z)}, {_fmt(max_z)}]"
+        )
+
+        # Axis ranges that differ too much can indicate parsing/scale issues.
+        ranges = [max_x - min_x, max_y - min_y, max_z - min_z]
+        pos_ranges = [r for r in ranges if r > 0.0]
+        if len(pos_ranges) >= 2:
+            r_ratio = max(pos_ranges) / max(min(pos_ranges), 1.0e-30)
+            if r_ratio > 1.0e6:
+                self._log(
+                    f"  [WARN] axis range ratio is very large ({_fmt(r_ratio)}). "
+                    "Check node parse/scaling or model unit consistency."
+                )
 
     def _parse_cdb_elements_by_mat(self, cdb_path):
         """Parse EBLOCK and return {mat_id: [(eid, [n1..n8]), ...]}.
