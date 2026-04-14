@@ -1970,7 +1970,7 @@ class ConverterApp:
                 if mat.lower().startswith("mat999"):
                     # Orthotropic
                     f.write("*ELASTIC, TYPE=ENGINEERING CONSTANTS\n")
-                    keys_main = ["ex", "ey", "ez", "nuxy", "nuyz", "nuxz", "gxy", "gyz", "gxz"]
+                    keys_main = ["ex", "ey", "ez", "nuxy", "nuxz", "nuyz", "gxy", "gxz", "gyz"]
                     rows_all = []
                     for k in keys_main:
                         rows_all.extend(self._prop_rows(props, k))
