@@ -16,6 +16,11 @@ class ConverterApp:
 
         self.db_path = tk.StringVar()
         self.output_dir = tk.StringVar()
+        # _data subfolder next to the .db; all intermediate artifacts (cdb,
+        # step1 logs, step1 metadata, MAPDL run_location files) live here so
+        # the top-level output directory stays clean and holds only the
+        # final .inp.
+        self.data_dir = tk.StringVar()
         self.abaqus_cmd = tk.StringVar(value="abaqus")
         self.node_tol = tk.StringVar(value="1e-6")
         # UNBLOCKED CDWRITE format expands ETBLOCK into classic ET/KEYOPT
@@ -121,11 +126,16 @@ class ConverterApp:
         wants to inspect a previous run's log)."""
         log_path = self._step1_log_path
         if not log_path or not os.path.exists(log_path):
-            out_dir = self.output_dir.get()
-            if out_dir:
-                candidate = os.path.join(out_dir, "step1_apdl.log")
+            # Prefer the new _data subfolder, but fall back to the raw
+            # output dir for logs produced by older runs.
+            search_dirs = [self.data_dir.get(), self.output_dir.get()]
+            for d in search_dirs:
+                if not d:
+                    continue
+                candidate = os.path.join(d, "step1_apdl.log")
                 if os.path.exists(candidate):
                     log_path = candidate
+                    break
         if not log_path or not os.path.exists(log_path):
             messagebox.showinfo(
                 "Step 1 Commands",
@@ -163,8 +173,13 @@ class ConverterApp:
         if not db_path:
             messagebox.showwarning("Warning", "Select an ANSYS .db file first.")
             return
-        # Output directory is always the folder containing the selected .db.
-        self.output_dir.set(os.path.dirname(os.path.abspath(db_path)))
+        # Output directory is always the folder containing the selected .db;
+        # intermediate artifacts go into a _data subfolder next to it.
+        out_dir = os.path.dirname(os.path.abspath(db_path))
+        data_dir = os.path.join(out_dir, "_data")
+        os.makedirs(data_dir, exist_ok=True)
+        self.output_dir.set(out_dir)
+        self.data_dir.set(data_dir)
         self.btn_run.config(state="disabled")
         threading.Thread(target=self._run_pipeline, daemon=True).start()
 
@@ -176,7 +191,7 @@ class ConverterApp:
             if "Step 1&2" in until:
                 self._log("\n=== Stopped after Step 1&2 ===")
                 return
-            cdb_path = os.path.join(self.output_dir.get(), "clean_model.cdb")
+            cdb_path = os.path.join(self.data_dir.get(), "clean_model.cdb")
             self._step4_convert(cdb_path)
             self._log("\n=== All steps completed ===")
         except Exception as e:
@@ -190,7 +205,10 @@ class ConverterApp:
 
         from ansys.mapdl.core import launch_mapdl
 
-        out_dir = self.output_dir.get()
+        # All MAPDL scratch files, the copied .db, step1 logs/metadata and
+        # the intermediate clean_model.* files live under <out>/_data.
+        out_dir = self.data_dir.get()
+        os.makedirs(out_dir, exist_ok=True)
 
         version_str = self.mapdl_version.get().strip()
         if version_str:
@@ -1293,18 +1311,20 @@ class ConverterApp:
         self._log("\n=== Step 4: direct text INP build (no fromansys) ===")
 
         out_dir = self.output_dir.get()
+        data_dir = self.data_dir.get() or out_dir
         db_src = self.db_path.get()
         inp_stem = (
             os.path.splitext(os.path.basename(db_src))[0]
             if db_src
             else "converted_model"
         )
+        # Final .inp lives at the top level; step1 metadata is read from _data.
         inp_path = os.path.join(out_dir, f"{inp_stem}.inp")
 
         nodes = self._parse_cdb_nodes(cdb_path)
         elems_by_mat = self._parse_cdb_elements_by_mat(cdb_path)
-        nset_txt = os.path.join(out_dir, "step1_nsets.txt")
-        mplist_txt = os.path.join(out_dir, "step1_mplist.txt")
+        nset_txt = os.path.join(data_dir, "step1_nsets.txt")
+        mplist_txt = os.path.join(data_dir, "step1_mplist.txt")
         cdb_nsets = self._parse_cdb_nsets(cdb_path)
         if os.path.exists(nset_txt):
             nsets = self._read_nsets_txt(nset_txt)
