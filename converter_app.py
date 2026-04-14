@@ -1980,13 +1980,15 @@ class ConverterApp:
                             vals = [self._value_for_temp(self._prop_rows(props, k), t) for k in keys_main]
                             if any(v is None for v in vals):
                                 continue
-                            f.write(", ".join(self._fmt_num(v) for v in vals) + f", {self._fmt_num(t)}\n")
+                            f.write(", ".join(self._fmt_num(v) for v in vals[:8]) + "\n")
+                            f.write(f"{self._fmt_num(vals[8])}, {self._fmt_num(t)}\n")
                     else:
                         vals = [self._value_for_temp(self._prop_rows(props, k), 0.0) for k in keys_main]
                         if any(v is None for v in vals):
                             f.write("** TODO: fill engineering constants\n")
                         else:
-                            f.write(", ".join(self._fmt_num(v) for v in vals) + "\n")
+                            f.write(", ".join(self._fmt_num(v) for v in vals[:8]) + "\n")
+                            f.write(f"{self._fmt_num(vals[8])}\n")
 
                     f.write("*EXPANSION, TYPE=ORTHOTROPIC\n")
                     ctex_rows = self._prop_rows(props, "alpx")
