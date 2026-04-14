@@ -1322,8 +1322,11 @@ class ConverterApp:
         if not elems_by_mat:
             raise RuntimeError("EBLOCK에서 요소를 읽지 못했습니다.")
 
+        self._log_node_coordinate_stats(nodes, "NBLOCK raw")
+
         # Abaqus 입력 전 길이 스케일 보정 (x1000)
         nodes = self._scale_nodes(nodes, 1000.0)
+        self._log_node_coordinate_stats(nodes, "Scaled x1000")
         self._log("Applied coordinate scale-up: x1000")
 
         self._write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info)
@@ -1341,8 +1344,7 @@ class ConverterApp:
         nodes = {}
         in_nblock = False
         skip_format = False
-        num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?")
-        int_pat = re.compile(r"[-+]?\d+")
+        num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[DdEe][-+]?\d+)?")
 
         for raw in lines:
             s = raw.strip()
@@ -1362,16 +1364,47 @@ class ConverterApp:
             if not s:
                 continue
 
-            ints = int_pat.findall(s)
-            nums = num_pat.findall(s)
-            if not ints or len(nums) < 4:
-                continue
-            try:
-                nid = int(ints[0])
-                x, y, z = float(nums[-3]), float(nums[-2]), float(nums[-1])
-            except ValueError:
-                continue
-            nodes[nid] = (x, y, z)
+            # NBLOCK (예: (3i9,6e21.13e3)) 데이터 라인 파싱:
+            # - 앞 3개 정수 필드(각 9자리): NODE, 0, 0
+            # - 뒤 실수 필드(각 21자리): X, Y, Z ... (생략되면 0으로 간주)
+            # 좌표 필드 사이 공백이 없더라도 21자리 고정폭으로 절단해 읽는다.
+            nid = None
+            coords = [0.0, 0.0, 0.0]
+            if len(raw) >= 9:
+                try:
+                    nid = int(raw[0:9].strip())
+                except ValueError:
+                    nid = None
+
+            if nid is not None:
+                tail = raw[27:]
+                vals = []
+                # tail 부분에서만 숫자를 추출하면
+                # 1) 좌표 사이 공백 유무와 무관하고
+                # 2) 누락된 좌표는 자동으로 0.0 유지된다.
+                for tok in num_pat.findall(tail):
+                    try:
+                        vals.append(float(tok.replace("D", "E").replace("d", "e")))
+                    except ValueError:
+                        pass
+                    if len(vals) >= 3:
+                        break
+                # 예외적으로 regex가 비면, 21자리 고정폭으로 한 번 더 시도.
+                if not vals:
+                    for idx in range(3):
+                        seg = tail[idx * 21:(idx + 1) * 21]
+                        if not seg:
+                            break
+                        val = seg.strip()
+                        if not val:
+                            continue
+                        try:
+                            vals.append(float(val.replace("D", "E").replace("d", "e")))
+                        except ValueError:
+                            continue
+                for idx, v in enumerate(vals[:3]):
+                    coords[idx] = v
+                nodes[nid] = (coords[0], coords[1], coords[2])
         return nodes
 
     def _parse_cdb_elements_by_mat(self, cdb_path):
@@ -1592,6 +1625,31 @@ class ConverterApp:
             nid: (xyz[0] * factor, xyz[1] * factor, xyz[2] * factor)
             for nid, xyz in nodes.items()
         }
+
+    def _log_node_coordinate_stats(self, nodes, label):
+        """Log min/max and outlier-like spread for node coordinates."""
+        if not nodes:
+            self._log(f"{label}: no nodes")
+            return
+        xs = [xyz[0] for xyz in nodes.values()]
+        ys = [xyz[1] for xyz in nodes.values()]
+        zs = [xyz[2] for xyz in nodes.values()]
+
+        def _axis_stat(vals):
+            vmin = min(vals)
+            vmax = max(vals)
+            span = vmax - vmin
+            return vmin, vmax, span
+
+        x0, x1, dx = _axis_stat(xs)
+        y0, y1, dy = _axis_stat(ys)
+        z0, z1, dz = _axis_stat(zs)
+        self._log(
+            f"{label} node stats: count={len(nodes)} | "
+            f"x=[{x0:.9g}, {x1:.9g}] Δ={dx:.9g}, "
+            f"y=[{y0:.9g}, {y1:.9g}] Δ={dy:.9g}, "
+            f"z=[{z0:.9g}, {z1:.9g}] Δ={dz:.9g}"
+        )
 
     def _prop_rows(self, props, key):
         entry = props.get(key, {})
