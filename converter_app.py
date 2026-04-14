@@ -1337,107 +1337,95 @@ class ConverterApp:
         )
 
     def _parse_cdb_nodes(self, cdb_path):
-        """Parse NBLOCK and return {node_id: (x, y, z)}."""
+        """Parse NBLOCK and return {node_id: (x, y, z)}.
+
+        NBLOCK 파싱 원칙 (Fortran 고정폭 포맷을 그대로 따른다):
+
+            NBLOCK,NUMFIELD,Solkey,NDMAX,NDSEL
+            (3i9,6e21.13e3)
+                    1        0        0 1.7500E+001 1.5869E+001 ...
+
+        1) ``NBLOCK`` 헤더 바로 다음 라인의 Fortran 포맷 지정자에서
+           정수 필드 개수/폭(int_count, int_width)과 실수 필드 폭(float_width)을 읽는다.
+           기본값은 ``(3i9,6e21.13e3)``.
+        2) 각 데이터 라인은 컬럼 단위로 엄격하게 잘라 해석한다.
+           - 첫 번째 정수 필드(폭 int_width) = 노드 번호
+           - 좌표는 ``int_count * int_width`` 컬럼부터 시작해
+             각 ``float_width`` 컬럼씩 잘라 x, y, z 로 읽는다 (앞 3개만 사용;
+             뒤쪽 회전 필드 thxy/thyz/thzx 는 무시).
+           - 라인이 짧아서 해당 컬럼이 없거나 해당 슬라이스가 공백뿐이면
+             그 좌표는 0.0 으로 간주한다.
+           - 음수(``-``)가 float_width 칸을 가득 채워 좌표 사이 공백이 없어도
+             컬럼 단위로 잘라내므로 정상 파싱된다.
+        3) 다음 중 하나를 만나면 NBLOCK 이 끝난 것으로 본다.
+           - 라인이 ``-1`` 로 시작 (ANSYS sentinel)
+           - 첫 int_width 컬럼이 정수로 파싱되지 않음 (다음 명령/블록 진입)
+        """
         with open(cdb_path, "r") as f:
             lines = f.readlines()
 
         nodes = {}
         in_nblock = False
+        format_read = False
         int_count = 3
         int_width = 9
         float_width = 21
-        real_pat = re.compile(
-            r"[-+]?(?:\d+\.\d*|\.\d+|\d+[DdEe][-+]?\d+)(?:[DdEe][-+]?\d+)?"
+        # Fortran 포맷 지정자: (3i9,6e21.13e3) 등
+        fmt_pat = re.compile(
+            r"\(\s*(\d+)\s*[iI]\s*(\d+)\s*,\s*\d+\s*[eEdDfFgG]\s*(\d+)",
         )
-        fmt_int = re.compile(r"(\d+)\s*[iI]\s*(\d+)")
-        fmt_real = re.compile(r"(\d+)\s*[eEdD]\s*(\d+)")
-        malformed_nids = []
 
         for raw in lines:
-            s = raw.strip()
-            u = s.upper()
-            if not in_nblock and u.startswith("NBLOCK"):
-                in_nblock = True
-                # 기본 NBLOCK 포맷은 (3i9,6e21.13e3)이지만
-                # 모델/버전별로 앞쪽 integer field 개수가 달라질 수 있다.
-                # 다음 포맷 라인에서 i/e field 폭을 읽어 좌표 시작 위치를 동적으로 계산.
-                continue
+            # 컬럼 기반 파싱이므로 줄바꿈만 제거하고 선행 공백은 보존한다.
+            line = raw.rstrip("\r\n")
+            stripped = line.strip()
+
             if not in_nblock:
+                if stripped.upper().startswith("NBLOCK"):
+                    in_nblock = True
+                    format_read = False
                 continue
 
-            if s.startswith("("):
-                m_int = fmt_int.search(s)
-                if m_int:
-                    int_count = int(m_int.group(1))
-                    int_width = int(m_int.group(2))
-                m_real = fmt_real.search(s)
-                if m_real:
-                    float_width = int(m_real.group(2))
-                continue
+            # NBLOCK 헤더 바로 다음에 오는 Fortran 포맷 지정자.
+            if not format_read:
+                format_read = True
+                if stripped.startswith("("):
+                    m = fmt_pat.match(stripped)
+                    if m:
+                        int_count = int(m.group(1))
+                        int_width = int(m.group(2))
+                        float_width = int(m.group(3))
+                    continue
+                # 포맷 라인이 생략된 경우엔 기본값을 쓰고 그대로 데이터로 흘린다.
 
-            if s.startswith("-1"):
+            # 블록 종료 sentinel.
+            if stripped.startswith("-1") or not stripped:
                 in_nblock = False
                 continue
-            if not s:
+
+            # 첫 필드에서 노드 번호를 읽는다. 정수가 아니면 NBLOCK 을 벗어난 것.
+            node_field = line[0:int_width]
+            try:
+                nid = int(node_field.strip())
+            except ValueError:
+                in_nblock = False
                 continue
 
-            nid = None
-            if len(raw) >= int_width:
-                try:
-                    nid = int(raw[0:int_width].strip())
-                except ValueError:
-                    nid = None
-
-            if nid is not None:
-                tail = raw[int_count * int_width:]
-                vals = []
-                fixed_ok = True
-                # 고정폭 우선 파싱: integer 필드 숫자(예: 1,1,0)가
-                # 좌표로 오인되는 문제를 피한다.
-                for idx in range(3):
-                    a = idx * float_width
-                    b = (idx + 1) * float_width
-                    seg = tail[a:b]
-                    # NBLOCK 고정폭에서 좌표 필드가 빈칸이면 0.0으로 간주한다.
-                    # (일부 CDB는 trailing zero field를 공백으로 내보냄)
-                    if not seg:
-                        vals.append(0.0)
-                        continue
-                    val = seg.strip()
-                    if not val:
-                        vals.append(0.0)
-                        continue
-                    try:
-                        vals.append(float(val.replace("D", "E").replace("d", "e")))
-                    except ValueError:
-                        fixed_ok = False
-                        break
-
-                # 고정폭 파싱이 실패하면 regex fallback.
-                if not fixed_ok:
-                    vals = []
-                    for tok in real_pat.findall(tail):
-                        try:
-                            vals.append(float(tok.replace("D", "E").replace("d", "e")))
-                        except ValueError:
-                            pass
-                        if len(vals) >= 3:
-                            break
-
-                # 고정폭/regex 모두 실패해서 좌표 3개를 못 읽은 행만 스킵.
-                if len(vals) < 3:
-                    malformed_nids.append(nid)
+            # 좌표 영역은 int_count * int_width 컬럼 이후부터.
+            # 각 좌표는 정확히 float_width 컬럼을 차지한다.
+            coord_start = int_count * int_width
+            coords = [0.0, 0.0, 0.0]
+            for i in range(3):
+                a = coord_start + i * float_width
+                b = a + float_width
+                seg = line[a:b].strip()
+                if not seg:
+                    # 라인이 짧거나 해당 필드가 비어 있으면 0.0.
                     continue
-                nodes[nid] = (vals[0], vals[1], vals[2])
+                coords[i] = float(seg.replace("D", "E").replace("d", "e"))
 
-        if malformed_nids:
-            sample = ", ".join(str(v) for v in malformed_nids[:8])
-            more = "" if len(malformed_nids) <= 8 else ", ..."
-            self._log(
-                "Warning: skipped malformed NBLOCK node row(s) with unreadable "
-                f"XYZ fields: {len(malformed_nids)} node(s) "
-                f"(sample: {sample}{more})"
-            )
+            nodes[nid] = (coords[0], coords[1], coords[2])
+
         return nodes
 
     def _parse_cdb_elements_by_mat(self, cdb_path):
