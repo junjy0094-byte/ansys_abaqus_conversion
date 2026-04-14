@@ -2057,8 +2057,8 @@ class ConverterApp:
             f.write("*TEMPERATURE, OP=NEW\n")
             f.write("NSET_TEMPERATURE, 25.0\n")
             f.write("*BOUNDARY\n")
-            f.write("NSET_BC_Y,XSYMM\n")
-            f.write("NSET_BC_X,YSYMM\n")
+            f.write("NSET_BC_Y,YSYMM\n")
+            f.write("NSET_BC_X,XSYMM\n")
             f.write("NSET_BC_ALL,3,,0\n")
 
 
