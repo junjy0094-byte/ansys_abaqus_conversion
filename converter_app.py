@@ -1322,8 +1322,11 @@ class ConverterApp:
         if not elems_by_mat:
             raise RuntimeError("EBLOCK에서 요소를 읽지 못했습니다.")
 
+        self._log_node_coordinate_stats(nodes, "NBLOCK raw")
+
         # Abaqus 입력 전 길이 스케일 보정 (x1000)
         nodes = self._scale_nodes(nodes, 1000.0)
+        self._log_node_coordinate_stats(nodes, "Scaled x1000")
         self._log("Applied coordinate scale-up: x1000")
 
         self._write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info)
@@ -1341,7 +1344,7 @@ class ConverterApp:
         nodes = {}
         in_nblock = False
         skip_format = False
-        num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?")
+        num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[DdEe][-+]?\d+)?")
         int_pat = re.compile(r"[-+]?\d+")
 
         for raw in lines:
@@ -1362,15 +1365,32 @@ class ConverterApp:
             if not s:
                 continue
 
-            ints = int_pat.findall(s)
-            nums = num_pat.findall(s)
-            if not ints or len(nums) < 4:
-                continue
-            try:
-                nid = int(ints[0])
-                x, y, z = float(nums[-3]), float(nums[-2]), float(nums[-1])
-            except ValueError:
-                continue
+            # NBLOCK은 고정폭 형식이므로 먼저 fixed-width 파싱을 시도한다.
+            # 일반적으로 앞 9자리 정수 필드에 node id가 있고, 뒤쪽 3개 실수
+            # 필드가 X/Y/Z 좌표다.
+            nid = None
+            x = y = z = None
+            if len(raw) >= 69:
+                try:
+                    nid = int(raw[0:9].strip())
+                    x = float(raw[-60:-40].strip().replace("D", "E").replace("d", "e"))
+                    y = float(raw[-40:-20].strip().replace("D", "E").replace("d", "e"))
+                    z = float(raw[-20:].strip().replace("D", "E").replace("d", "e"))
+                except ValueError:
+                    nid = None
+
+            # fixed-width가 실패하면 기존 regex 파싱으로 fallback.
+            if nid is None:
+                ints = int_pat.findall(s)
+                nums = num_pat.findall(s)
+                if not ints or len(nums) < 4:
+                    continue
+                try:
+                    nid = int(ints[0])
+                    parsed = [float(v.replace("D", "E").replace("d", "e")) for v in nums[-3:]]
+                    x, y, z = parsed[0], parsed[1], parsed[2]
+                except ValueError:
+                    continue
             nodes[nid] = (x, y, z)
         return nodes
 
@@ -1592,6 +1612,31 @@ class ConverterApp:
             nid: (xyz[0] * factor, xyz[1] * factor, xyz[2] * factor)
             for nid, xyz in nodes.items()
         }
+
+    def _log_node_coordinate_stats(self, nodes, label):
+        """Log min/max and outlier-like spread for node coordinates."""
+        if not nodes:
+            self._log(f"{label}: no nodes")
+            return
+        xs = [xyz[0] for xyz in nodes.values()]
+        ys = [xyz[1] for xyz in nodes.values()]
+        zs = [xyz[2] for xyz in nodes.values()]
+
+        def _axis_stat(vals):
+            vmin = min(vals)
+            vmax = max(vals)
+            span = vmax - vmin
+            return vmin, vmax, span
+
+        x0, x1, dx = _axis_stat(xs)
+        y0, y1, dy = _axis_stat(ys)
+        z0, z1, dz = _axis_stat(zs)
+        self._log(
+            f"{label} node stats: count={len(nodes)} | "
+            f"x=[{x0:.9g}, {x1:.9g}] Δ={dx:.9g}, "
+            f"y=[{y0:.9g}, {y1:.9g}] Δ={dy:.9g}, "
+            f"z=[{z0:.9g}, {z1:.9g}] Δ={dz:.9g}"
+        )
 
     def _prop_rows(self, props, key):
         entry = props.get(key, {})
