@@ -1391,24 +1391,30 @@ class ConverterApp:
             if nid is not None:
                 tail = raw[int_count * int_width:]
                 vals = []
+                fixed_ok = True
                 # 고정폭 우선 파싱: integer 필드 숫자(예: 1,1,0)가
                 # 좌표로 오인되는 문제를 피한다.
                 for idx in range(3):
                     a = idx * float_width
                     b = (idx + 1) * float_width
                     seg = tail[a:b]
+                    # NBLOCK 고정폭에서 좌표 필드가 빈칸이면 0.0으로 간주한다.
+                    # (일부 CDB는 trailing zero field를 공백으로 내보냄)
                     if not seg:
-                        break
+                        vals.append(0.0)
+                        continue
                     val = seg.strip()
                     if not val:
+                        vals.append(0.0)
                         continue
                     try:
                         vals.append(float(val.replace("D", "E").replace("d", "e")))
                     except ValueError:
-                        pass
+                        fixed_ok = False
+                        break
 
                 # 고정폭 파싱이 실패하면 regex fallback.
-                if len(vals) < 3:
+                if not fixed_ok:
                     vals = []
                     for tok in real_pat.findall(tail):
                         try:
@@ -1418,8 +1424,7 @@ class ConverterApp:
                         if len(vals) >= 3:
                             break
 
-                # 좌표 3개를 끝까지 확보하지 못한 경우 0.0으로 채워 넣지 않고
-                # 해당 노드를 스킵한다. (0,0,0) 같은 가짜 좌표 생성 방지)
+                # 고정폭/regex 모두 실패해서 좌표 3개를 못 읽은 행만 스킵.
                 if len(vals) < 3:
                     malformed_nids.append(nid)
                     continue
@@ -1429,7 +1434,7 @@ class ConverterApp:
             sample = ", ".join(str(v) for v in malformed_nids[:8])
             more = "" if len(malformed_nids) <= 8 else ", ..."
             self._log(
-                "Warning: skipped malformed NBLOCK node row(s) with incomplete "
+                "Warning: skipped malformed NBLOCK node row(s) with unreadable "
                 f"XYZ fields: {len(malformed_nids)} node(s) "
                 f"(sample: {sample}{more})"
             )
