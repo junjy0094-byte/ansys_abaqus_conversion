@@ -39,10 +39,6 @@ class ConverterApp:
         tk.Entry(frm_file, textvariable=self.db_path, width=55).grid(row=0, column=1, padx=5)
         tk.Button(frm_file, text="Browse", command=self._browse_db).grid(row=0, column=2)
 
-        tk.Label(frm_file, text="Output Dir:").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        tk.Entry(frm_file, textvariable=self.output_dir, width=55).grid(row=1, column=1, padx=5, pady=(5, 0))
-        tk.Button(frm_file, text="Browse", command=self._browse_outdir).grid(row=1, column=2, pady=(5, 0))
-
         # --- Settings ---
         frm_set = tk.LabelFrame(self.root, text="Settings", padx=10, pady=5)
         frm_set.pack(fill="x", padx=10, pady=5)
@@ -115,13 +111,8 @@ class ConverterApp:
         path = filedialog.askopenfilename(filetypes=[("ANSYS DB", "*.db"), ("All", "*.*")])
         if path:
             self.db_path.set(path)
-            if not self.output_dir.get():
-                self.output_dir.set(os.path.dirname(path))
-
-    def _browse_outdir(self):
-        path = filedialog.askdirectory()
-        if path:
-            self.output_dir.set(path)
+            # Output directory always mirrors the input .db file's folder.
+            self.output_dir.set(os.path.dirname(path))
 
     def _show_step1_log(self):
         """Pop up a window showing the APDL commands recorded during the
@@ -168,9 +159,12 @@ class ConverterApp:
         self.root.update_idletasks()
 
     def _run(self):
-        if not self.db_path.get():
+        db_path = self.db_path.get()
+        if not db_path:
             messagebox.showwarning("Warning", "Select an ANSYS .db file first.")
             return
+        # Output directory is always the folder containing the selected .db.
+        self.output_dir.set(os.path.dirname(os.path.abspath(db_path)))
         self.btn_run.config(state="disabled")
         threading.Thread(target=self._run_pipeline, daemon=True).start()
 
