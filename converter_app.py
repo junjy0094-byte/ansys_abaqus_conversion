@@ -1322,9 +1322,15 @@ class ConverterApp:
         if not elems_by_mat:
             raise RuntimeError("EBLOCK에서 요소를 읽지 못했습니다.")
 
+        original_nodes = nodes
+        self._log(self._summarize_nodes(original_nodes, "Parsed NBLOCK nodes (original scale)"))
+
         # Abaqus 입력 전 길이 스케일 보정 (x1000)
-        nodes = self._scale_nodes(nodes, 1000.0)
+        scale_factor = 1000.0
+        nodes = self._scale_nodes(original_nodes, scale_factor)
         self._log("Applied coordinate scale-up: x1000")
+        self._log(self._summarize_nodes(nodes, "Scaled nodes (x1000)"))
+        self._log(self._verify_node_scaling(original_nodes, nodes, scale_factor))
 
         self._write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info)
         self._log(f"INP created: {inp_path}")
@@ -1340,21 +1346,33 @@ class ConverterApp:
 
         nodes = {}
         in_nblock = False
-        skip_format = False
-        num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?")
-        int_pat = re.compile(r"[-+]?\d+")
+        waiting_format = False
+        float_token_pat = re.compile(r"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?$")
+        int_token_pat = re.compile(r"^[-+]?\d+$")
+        format_pat = re.compile(
+            r"\(\s*(\d+)\s*[Ii]\d+\s*,\s*(\d+)\s*[Ee]\d+\.\d+\s*\)"
+        )
+        n_int_fields = 1
+        n_real_fields = 3
+
+        def _to_float(tok):
+            return float(tok.replace("D", "E").replace("d", "e"))
 
         for raw in lines:
             s = raw.strip()
             u = s.upper()
             if not in_nblock and u.startswith("NBLOCK"):
                 in_nblock = True
-                skip_format = True
+                waiting_format = True
                 continue
             if not in_nblock:
                 continue
-            if skip_format:
-                skip_format = False
+            if waiting_format:
+                waiting_format = False
+                m = format_pat.search(s)
+                if m:
+                    n_int_fields = int(m.group(1))
+                    n_real_fields = int(m.group(2))
                 continue
             if s.startswith("-1"):
                 in_nblock = False
@@ -1362,14 +1380,22 @@ class ConverterApp:
             if not s:
                 continue
 
-            ints = int_pat.findall(s)
-            nums = num_pat.findall(s)
-            if not ints or len(nums) < 4:
+            tokens = [tok for tok in s.replace(",", " ").split() if tok]
+            if len(tokens) < (n_int_fields + 3):
                 continue
             try:
-                nid = int(ints[0])
-                x, y, z = float(nums[-3]), float(nums[-2]), float(nums[-1])
-            except ValueError:
+                int_tokens = [tok for tok in tokens[:n_int_fields] if int_token_pat.match(tok)]
+                if not int_tokens:
+                    continue
+                nid = int(int_tokens[0])
+                real_tokens = [tok for tok in tokens[n_int_fields:] if float_token_pat.match(tok)]
+                if n_real_fields > 0:
+                    real_tokens = real_tokens[:n_real_fields]
+                if len(real_tokens) < 3:
+                    continue
+                # NBLOCK 실수 필드는 XYZ가 앞 3개이며, 뒤 필드는 회전/사용자 값일 수 있음.
+                x, y, z = _to_float(real_tokens[0]), _to_float(real_tokens[1]), _to_float(real_tokens[2])
+            except (ValueError, IndexError):
                 continue
             nodes[nid] = (x, y, z)
         return nodes
@@ -1592,6 +1618,46 @@ class ConverterApp:
             nid: (xyz[0] * factor, xyz[1] * factor, xyz[2] * factor)
             for nid, xyz in nodes.items()
         }
+
+    def _summarize_nodes(self, nodes, label):
+        """Build a compact summary string for node coordinates."""
+        if not nodes:
+            return f"{label}: no nodes"
+        xs = [xyz[0] for xyz in nodes.values()]
+        ys = [xyz[1] for xyz in nodes.values()]
+        zs = [xyz[2] for xyz in nodes.values()]
+        return (
+            f"{label}: count={len(nodes)}, "
+            f"x=[{min(xs):.6g}, {max(xs):.6g}], "
+            f"y=[{min(ys):.6g}, {max(ys):.6g}], "
+            f"z=[{min(zs):.6g}, {max(zs):.6g}]"
+        )
+
+    def _verify_node_scaling(self, original_nodes, scaled_nodes, factor):
+        """Check whether every node coordinate was multiplied by ``factor``."""
+        if not original_nodes or not scaled_nodes:
+            return "Scale check: skipped (no nodes)"
+        tol = 1.0e-8
+        bad = []
+        for nid, (ox, oy, oz) in original_nodes.items():
+            scaled = scaled_nodes.get(nid)
+            if scaled is None:
+                bad.append(nid)
+                if len(bad) >= 5:
+                    break
+                continue
+            x, y, z = scaled
+            if (
+                abs(x - (ox * factor)) > tol
+                or abs(y - (oy * factor)) > tol
+                or abs(z - (oz * factor)) > tol
+            ):
+                bad.append(nid)
+                if len(bad) >= 5:
+                    break
+        if bad:
+            return f"Scale check warning: unexpected precision for node IDs {bad} ..."
+        return f"Scale check: PASS (all nodes scaled by x{factor:g})"
 
     def _prop_rows(self, props, key):
         entry = props.get(key, {})
