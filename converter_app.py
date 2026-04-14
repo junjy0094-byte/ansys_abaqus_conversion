@@ -1346,9 +1346,12 @@ class ConverterApp:
         int_count = 3
         int_width = 9
         float_width = 21
-        num_pat = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[DdEe][-+]?\d+)?")
+        real_pat = re.compile(
+            r"[-+]?(?:\d+\.\d*|\.\d+|\d+[DdEe][-+]?\d+)(?:[DdEe][-+]?\d+)?"
+        )
         fmt_int = re.compile(r"(\d+)\s*[iI]\s*(\d+)")
         fmt_real = re.compile(r"(\d+)\s*[eEdD]\s*(\d+)")
+        malformed_nids = []
 
         for raw in lines:
             s = raw.strip()
@@ -1379,7 +1382,6 @@ class ConverterApp:
                 continue
 
             nid = None
-            coords = [0.0, 0.0, 0.0]
             if len(raw) >= int_width:
                 try:
                     nid = int(raw[0:int_width].strip())
@@ -1408,7 +1410,7 @@ class ConverterApp:
                 # 고정폭 파싱이 실패하면 regex fallback.
                 if len(vals) < 3:
                     vals = []
-                    for tok in num_pat.findall(tail):
+                    for tok in real_pat.findall(tail):
                         try:
                             vals.append(float(tok.replace("D", "E").replace("d", "e")))
                         except ValueError:
@@ -1416,9 +1418,21 @@ class ConverterApp:
                         if len(vals) >= 3:
                             break
 
-                for idx, v in enumerate(vals[:3]):
-                    coords[idx] = v
-                nodes[nid] = (coords[0], coords[1], coords[2])
+                # 좌표 3개를 끝까지 확보하지 못한 경우 0.0으로 채워 넣지 않고
+                # 해당 노드를 스킵한다. (0,0,0) 같은 가짜 좌표 생성 방지)
+                if len(vals) < 3:
+                    malformed_nids.append(nid)
+                    continue
+                nodes[nid] = (vals[0], vals[1], vals[2])
+
+        if malformed_nids:
+            sample = ", ".join(str(v) for v in malformed_nids[:8])
+            more = "" if len(malformed_nids) <= 8 else ", ..."
+            self._log(
+                "Warning: skipped malformed NBLOCK node row(s) with incomplete "
+                f"XYZ fields: {len(malformed_nids)} node(s) "
+                f"(sample: {sample}{more})"
+            )
         return nodes
 
     def _parse_cdb_elements_by_mat(self, cdb_path):
