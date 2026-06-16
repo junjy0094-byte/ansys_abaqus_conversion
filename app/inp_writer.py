@@ -247,7 +247,8 @@ def _write_material_orthotropic(f, props):
             f.write(f"{fmt_num(vx)}, {fmt_num(vy)}, {fmt_num(vz)}\n")
 
 
-def write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, log_fn=None):
+def write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, log_fn=None,
+                       is_submodel=False):
     """Write the Abaqus INP template file."""
     with open(inp_path, "w") as f:
         f.write("*NODE\n")
@@ -277,50 +278,11 @@ def write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, 
             for es, mat in eff_mats:
                 f.write(f"*SOLID SECTION, ELSET={es}, orientation=Ori-1, MATERIAL={mat}\n")
 
-        required_nsets = ["nset_temperature", "nset_bc_y", "nset_bc_x", "nset_bc_all"]
-        for ns in required_nsets:
-            f.write(f"*NSET, NSET={ns}\n")
-            ids = nsets.get(ns, [])
-            for k in range(0, len(ids), 16):
-                f.write(", ".join(str(v) for v in ids[k:k + 16]) + "\n")
-            if not ids:
-                f.write("** TODO: fill node IDs\n")
-
-        master_eids = nsets.get("master_tie", []) or nsets.get("tie_master", [])
-        slave_eids = nsets.get("slave_tie", []) or nsets.get("tie_slave", [])
-        master_surf_nodes = nsets.get("master_tie_nodes", []) or nsets.get("tie_master_nodes", [])
-        slave_surf_nodes = nsets.get("slave_tie_nodes", []) or nsets.get("tie_slave_nodes", [])
-
-        elems_all = {}
-        for _mid, _lst in elems_by_mat.items():
-            for _eid, _conn in _lst:
-                elems_all[int(_eid)] = _conn
-
-        tie_tol = 0.001
-        master_planes = split_tie_surface_planes(
-            elems_all, nodes, master_eids, master_surf_nodes, tol_dist=tie_tol, log_fn=log_fn
-        )
-        slave_planes = split_tie_surface_planes(
-            elems_all, nodes, slave_eids, slave_surf_nodes, tol_dist=tie_tol, log_fn=log_fn
-        )
-        if log_fn:
-            log_fn(
-                f"  tie plane split: master={len(master_planes)} "
-                f"slave={len(slave_planes)} (tol_dist={tie_tol})"
-            )
-            for idx, grp in enumerate(master_planes, start=1):
-                log_fn(
-                    f"    master_tie_p{idx}: axis={grp['axis']} "
-                    f"offset={grp['offset']:.6g} faces={len(grp['faces'])}"
-                )
-            for idx, grp in enumerate(slave_planes, start=1):
-                log_fn(
-                    f"    slave_tie_p{idx}: axis={grp['axis']} "
-                    f"offset={grp['offset']:.6g} faces={len(grp['faces'])}"
-                )
-
-        _write_tie_plane_section(f, "master", master_eids, master_planes)
-        _write_tie_plane_section(f, "slave", slave_eids, slave_planes)
+        if is_submodel:
+            _write_nsets_submodel(f, nsets)
+        else:
+            _write_nsets_standard(f, nsets)
+            _write_tie_sections(f, nsets, nodes, elems_by_mat, log_fn)
 
         for mid in mat_ids:
             mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
@@ -331,17 +293,105 @@ def write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, 
             else:
                 _write_material_isotropic(f, props)
 
-        f.write("*TIE, NAME=tie-1\n")
-        f.write("slave_tie, master_tie\n")
-        f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
-        f.write("NSET_TEMPERATURE,183.0\n")
-        f.write("*STEP, INC=10000, NAME=step, NLGEOM=NO\n")
-        f.write("*STATIC\n")
-        f.write("1.0, 1.0, 1.0e-15, 1.0\n")
-        f.write("*TEMPERATURE, OP=NEW\n")
-        f.write("NSET_TEMPERATURE, 25.0\n")
-        f.write("*BOUNDARY\n")
-        f.write("NSET_BC_Y,YSYMM\n")
-        f.write("NSET_BC_X,XSYMM\n")
-        f.write("NSET_BC_ALL,3,,0\n")
-        f.write("*END STEP\n")
+        if is_submodel:
+            _write_step_submodel(f)
+        else:
+            _write_step_standard(f)
+
+
+def _write_nsets_standard(f, nsets):
+    """Write the four symmetry NSETs for a regular (non-submodel) model."""
+    for ns in ["nset_temperature", "nset_bc_y", "nset_bc_x", "nset_bc_all"]:
+        f.write(f"*NSET, NSET={ns}\n")
+        ids = nsets.get(ns, [])
+        for k in range(0, len(ids), 16):
+            f.write(", ".join(str(v) for v in ids[k:k + 16]) + "\n")
+        if not ids:
+            f.write("** TODO: fill node IDs\n")
+
+
+def _write_nsets_submodel(f, nsets):
+    """Write NSETs for a submodel: temperature + outermost-plane BC nset."""
+    for ns in ["nset_temperature", "nset_bc_sub"]:
+        f.write(f"*NSET, NSET={ns.upper()}\n")
+        ids = nsets.get(ns, [])
+        for k in range(0, len(ids), 16):
+            f.write(", ".join(str(v) for v in ids[k:k + 16]) + "\n")
+        if not ids:
+            f.write("** TODO: fill node IDs\n")
+    f.write("**HM_UNSUPPORTED_CARDS_MIDDLE\n")
+    f.write("*Submodel, type=NODE, exteriorTolerance=0.05\n")
+    f.write("NSET_BC_Sub,\n")
+
+
+def _write_tie_sections(f, nsets, nodes, elems_by_mat, log_fn):
+    """Write ELSET/SURFACE tie sections for a regular model."""
+    master_eids = nsets.get("master_tie", []) or nsets.get("tie_master", [])
+    slave_eids = nsets.get("slave_tie", []) or nsets.get("tie_slave", [])
+    master_surf_nodes = nsets.get("master_tie_nodes", []) or nsets.get("tie_master_nodes", [])
+    slave_surf_nodes = nsets.get("slave_tie_nodes", []) or nsets.get("tie_slave_nodes", [])
+
+    elems_all = {}
+    for _mid, _lst in elems_by_mat.items():
+        for _eid, _conn in _lst:
+            elems_all[int(_eid)] = _conn
+
+    tie_tol = 0.001
+    master_planes = split_tie_surface_planes(
+        elems_all, nodes, master_eids, master_surf_nodes, tol_dist=tie_tol, log_fn=log_fn
+    )
+    slave_planes = split_tie_surface_planes(
+        elems_all, nodes, slave_eids, slave_surf_nodes, tol_dist=tie_tol, log_fn=log_fn
+    )
+    if log_fn:
+        log_fn(
+            f"  tie plane split: master={len(master_planes)} "
+            f"slave={len(slave_planes)} (tol_dist={tie_tol})"
+        )
+        for idx, grp in enumerate(master_planes, start=1):
+            log_fn(
+                f"    master_tie_p{idx}: axis={grp['axis']} "
+                f"offset={grp['offset']:.6g} faces={len(grp['faces'])}"
+            )
+        for idx, grp in enumerate(slave_planes, start=1):
+            log_fn(
+                f"    slave_tie_p{idx}: axis={grp['axis']} "
+                f"offset={grp['offset']:.6g} faces={len(grp['faces'])}"
+            )
+
+    _write_tie_plane_section(f, "master", master_eids, master_planes)
+    _write_tie_plane_section(f, "slave", slave_eids, slave_planes)
+
+
+def _write_step_standard(f):
+    """Write the STEP block for a regular model."""
+    f.write("*TIE, NAME=tie-1\n")
+    f.write("slave_tie, master_tie\n")
+    f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
+    f.write("NSET_TEMPERATURE,183.0\n")
+    f.write("*STEP, INC=10000, NAME=step, NLGEOM=NO\n")
+    f.write("*STATIC\n")
+    f.write("1.0, 1.0, 1.0e-15, 1.0\n")
+    f.write("*TEMPERATURE, OP=NEW\n")
+    f.write("NSET_TEMPERATURE, 25.0\n")
+    f.write("*BOUNDARY\n")
+    f.write("NSET_BC_Y,YSYMM\n")
+    f.write("NSET_BC_X,XSYMM\n")
+    f.write("NSET_BC_ALL,3,,0\n")
+    f.write("*END STEP\n")
+
+
+def _write_step_submodel(f):
+    """Write the STEP block for a submodel."""
+    f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
+    f.write("NSET_TEMPERATURE,183.0\n")
+    f.write("*STEP, INC=10000, NAME=step, NLGEOM=NO\n")
+    f.write("*STATIC\n")
+    f.write("1.0, 1.0, 1.0e-15, 1.0\n")
+    f.write("*TEMPERATURE, OP=NEW\n")
+    f.write("NSET_TEMPERATURE, 25.0\n")
+    f.write("*boundary, submodel, step=1\n")
+    f.write("NSET_BC_Sub,1,1\n")
+    f.write("NSET_BC_Sub,2,2\n")
+    f.write("NSET_BC_Sub,3,3\n")
+    f.write("*END STEP\n")

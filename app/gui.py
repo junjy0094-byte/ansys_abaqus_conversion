@@ -24,6 +24,7 @@ class ConverterApp:
         # NOTE: abaqus fromansys (Step 4) requires BLOCKED nblock/eblock,
         # so a full Step 4 run forces BLOCKED regardless of this flag.
         self.cdwrite_unblocked = tk.BooleanVar(value=True)
+        self.is_submodel = tk.BooleanVar(value=False)
         self.mapdl_version = tk.StringVar(value="242")
         self.nproc = tk.StringVar(value="4")
         self.license_type = tk.StringVar(value="preppost")
@@ -57,6 +58,12 @@ class ConverterApp:
             text="CDWRITE UNBLOCKED (HyperMesh compatible; auto-disabled for full Step 4 run)",
             variable=self.cdwrite_unblocked,
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 0))
+
+        tk.Checkbutton(
+            frm_set,
+            text="Sub-model (.db is a submodel — skips tie processing, uses submodel BCs)",
+            variable=self.is_submodel,
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(3, 0))
 
         frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
         frm_mapdl.pack(fill="x", padx=10, pady=5)
@@ -236,7 +243,7 @@ class ConverterApp:
             mapdl.nummrg("NODE", tol)
 
             self._log("Processing tie (CE) conditions and loads...")
-            mapdl_ops.handle_ties_and_loads(mapdl, self._log)
+            mapdl_ops.handle_ties_and_loads(mapdl, self._log, is_submodel=self.is_submodel.get())
 
             self._log("Removing unused material properties...")
             mapdl_ops.remove_unused_mats(mapdl, self._log)
@@ -294,7 +301,7 @@ class ConverterApp:
         nset_path = os.path.join(out_dir, "step1_nsets.txt")
         mplist_path = os.path.join(out_dir, "step1_mplist.txt")
 
-        nset_data = mapdl_ops.collect_nset_data(mapdl, self._log)
+        nset_data = mapdl_ops.collect_nset_data(mapdl, self._log, is_submodel=self.is_submodel.get())
         with open(nset_path, "w") as f:
             for name, ids in nset_data.items():
                 f.write(f"[{name}]\n")
@@ -349,7 +356,10 @@ class ConverterApp:
         utils.log_node_coordinate_stats(nodes, "Scaled x1000", self._log)
         self._log("Applied coordinate scale-up: x1000")
 
-        inp_writer.write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, self._log)
+        inp_writer.write_template_inp(
+            inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, self._log,
+            is_submodel=self.is_submodel.get(),
+        )
         self._log(f"INP created: {inp_path}")
         self._log(
             "NOTE: 재료 상세(온도의존/ENG CONSTANTS/CTE)는 템플릿 자리만 생성됩니다. "

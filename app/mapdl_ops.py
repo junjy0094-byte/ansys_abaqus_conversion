@@ -427,11 +427,47 @@ def delete_array_params(mapdl):
 # High-level MAPDL operations
 # ---------------------------------------------------------------------------
 
-def handle_ties_and_loads(mapdl, log_fn):
+def handle_ties_and_loads(mapdl, log_fn, is_submodel=False):
     """Detect tie conditions (CE/CEINTF), create TIE_SLAVE/TIE_MASTER
     components, then delete all other components, CEs, loads, and coupled sets.
+
+    When ``is_submodel=True`` the tie detection/creation steps are skipped
+    entirely; all existing components are deleted and only loads/CEs/CPs
+    and array params are cleaned up.
     """
     mapdl.allsel("ALL")
+
+    load_cmds = [
+        ("fdele", ("ALL", "ALL")),
+        ("ddele", ("ALL", "ALL")),
+        ("sfedele", ("ALL", "ALL", "ALL")),
+        ("sfdele", ("ALL", "ALL")),
+        ("bfdele", ("ALL", "ALL")),
+        ("bfedele", ("ALL", "ALL", "ALL")),
+        ("cedele", ("ALL",)),
+        ("cpdele", ("ALL",)),
+    ]
+
+    if is_submodel:
+        log_fn("  Submodel mode: skipping tie detection.")
+        existing_cms = list_all_components(mapdl)
+        deleted_cm = 0
+        for name in existing_cms:
+            try:
+                mapdl.cmdele(name)
+                deleted_cm += 1
+            except Exception:
+                pass
+        log_fn(f"  Removed {deleted_cm} component name(s).")
+        for cmd_name, args in load_cmds:
+            try:
+                getattr(mapdl, cmd_name)(*args)
+            except Exception:
+                pass
+        log_fn("  Deleted all loads / constraint equations / coupled sets.")
+        n_arrays = delete_array_params(mapdl)
+        log_fn(f"  Deleted {n_arrays} array/table parameter(s).")
+        return
 
     try:
         ce_count = int(mapdl.get("NCE", "CE", 0, "NUM", "COUNT"))
@@ -528,16 +564,6 @@ def handle_ties_and_loads(mapdl, log_fn):
             pass
     log_fn(f"  Removed {deleted_cm} non-tie component name(s).")
 
-    load_cmds = [
-        ("fdele", ("ALL", "ALL")),
-        ("ddele", ("ALL", "ALL")),
-        ("sfedele", ("ALL", "ALL", "ALL")),
-        ("sfdele", ("ALL", "ALL")),
-        ("bfdele", ("ALL", "ALL")),
-        ("bfedele", ("ALL", "ALL", "ALL")),
-        ("cedele", ("ALL",)),
-        ("cpdele", ("ALL",)),
-    ]
     for cmd_name, args in load_cmds:
         try:
             getattr(mapdl, cmd_name)(*args)
@@ -607,8 +633,12 @@ def remove_unused_mats(mapdl, log_fn):
     log_fn(f"  Deleted {deleted} / {len(all_mats)} unused material(s).")
 
 
-def collect_nset_data(mapdl, log_fn):
-    """Collect nset/tie metadata directly from node coordinates and components."""
+def collect_nset_data(mapdl, log_fn, is_submodel=False):
+    """Collect nset/tie metadata directly from node coordinates and components.
+
+    When ``is_submodel=True`` returns ``nset_bc_sub`` (all outermost-plane
+    nodes) instead of the three symmetry nsets, and omits tie data.
+    """
     mapdl.allsel("ALL")
     nnum = [int(v) for v in mapdl.mesh.nnum.tolist()]
     coords = mapdl.mesh.nodes
@@ -620,6 +650,23 @@ def collect_nset_data(mapdl, log_fn):
     min_x = min(v[0] for v in node_xyz.values())
     min_y = min(v[1] for v in node_xyz.values())
     min_z = min(v[2] for v in node_xyz.values())
+
+    if is_submodel:
+        max_x = max(v[0] for v in node_xyz.values())
+        max_y = max(v[1] for v in node_xyz.values())
+        max_z = max(v[2] for v in node_xyz.values())
+        bc_sub = sorted(
+            nid for nid, (x, y, z) in node_xyz.items()
+            if (abs(x - min_x) <= tol or abs(x - max_x) <= tol
+                or abs(y - min_y) <= tol or abs(y - max_y) <= tol
+                or abs(z - min_z) <= tol or abs(z - max_z) <= tol)
+        )
+        log_fn(f"  nset_bc_sub: {len(bc_sub)} outermost-plane node(s)")
+        mapdl.allsel("ALL")
+        return {
+            "nset_temperature": sorted(nnum),
+            "nset_bc_sub": bc_sub,
+        }
 
     bc_x = sorted(nid for nid, (x, _, _) in node_xyz.items() if abs(x - min_x) <= tol)
     bc_y = sorted(nid for nid, (_, y, _) in node_xyz.items() if abs(y - min_y) <= tol)
