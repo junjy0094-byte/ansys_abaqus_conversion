@@ -12,10 +12,12 @@ ANSYS -> Abaqus Converter : 참고 사항 (Notes)
 ================================================
 
 1. Effective Material (직교이방성 재질)
-   - 재질 번호가 999x (예: 9991, 9992, ...)로 ANSYS에 사전 정의되어 있어야 합니다.
-   - 재질 이름이 "mat999"로 시작하는 재질만 직교이방성(ENGINEERING CONSTANTS +
-     ORTHOTROPIC EXPANSION)으로 처리되고, 그 외 재질은 모두 등방성(ISOTROPIC)으로
-     처리됩니다. 번호 규칙을 지키지 않으면 항상 등방성으로 잘못 처리됩니다.
+   - "Orthotropic material present" 체크박스가 켜져 있을 때만 동작합니다.
+     꺼져 있으면 모든 재질을 등방성(ISOTROPIC)으로 처리합니다.
+   - Material # range(기본값 9990-9999)에 해당하는 재질 번호만 직교이방성
+     (ENGINEERING CONSTANTS + ORTHOTROPIC EXPANSION)으로 처리되고, 범위 밖 재질은
+     등방성으로 처리됩니다. 해당 번호대의 재질을 ANSYS에 미리 정의해 두어야 합니다.
+   - 범위는 Model Configuration에서 "9990-9999"처럼 직접 수정할 수 있습니다.
 
 2. 좌표 스케일 (Scale)
    - 노드 좌표는 항상 x1000 배율이 자동 적용됩니다 (예: ANSYS 모델 단위가 m일 때
@@ -48,6 +50,9 @@ ANSYS -> Abaqus Converter : 참고 사항 (Notes)
 
 7. Submodel 모드
    - exteriorTolerance=0.05로 코드에 고정되어 있습니다.
+   - .db 파일명이 "sub"로 끝나면(대소문자 무관, 예: model_sub.db) Sub-model 체크가
+     자동으로 켜지고, 그렇지 않으면 자동으로 꺼집니다. File Selection 칸에서 직접
+     체크/해제로 덮어쓸 수도 있습니다.
 
 8. MAPDL 실행 옵션
    - 병렬 모드는 SMP(-smp)로 고정되어 있습니다. MPI 등 다른 옵션이 필요하면
@@ -84,11 +89,14 @@ class ConverterApp:
             "Full model (no symmetry)",
         ]
         self.symmetry_mode = tk.StringVar(value=self.symmetry_options[0])
+        self.has_orthotropic = tk.BooleanVar(value=True)
+        self.ortho_mat_range = tk.StringVar(value="9990-9999")
         self.mapdl_version = tk.StringVar(value="242")
         self.nproc = tk.StringVar(value="4")
         self.license_type = tk.StringVar(value="preppost")
 
         self._step1_log_path = None
+        self.db_path.trace_add("write", self._on_db_path_change)
         self._build_ui()
 
     # -----------------------------------------------------------------------
@@ -102,6 +110,13 @@ class ConverterApp:
         tk.Label(frm_file, text="ANSYS .db:").grid(row=0, column=0, sticky="w")
         tk.Entry(frm_file, textvariable=self.db_path, width=55).grid(row=0, column=1, padx=5)
         tk.Button(frm_file, text="Browse", command=self._browse_db).grid(row=0, column=2)
+
+        tk.Checkbutton(
+            frm_file,
+            text="Sub-model (.db is a submodel — skips tie processing, uses submodel BCs; "
+                 "auto-set when filename ends with 'sub')",
+            variable=self.is_submodel,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 0))
 
         frm_set = tk.LabelFrame(self.root, text="Settings", padx=10, pady=5)
         frm_set.pack(fill="x", padx=10, pady=5)
@@ -137,9 +152,13 @@ class ConverterApp:
 
         tk.Checkbutton(
             frm_model,
-            text="Sub-model (.db is a submodel — skips tie processing, uses submodel BCs)",
-            variable=self.is_submodel,
-        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(3, 0))
+            text="Orthotropic (effective) material present",
+            variable=self.has_orthotropic,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        tk.Label(frm_model, text="Material # range:").grid(row=2, column=2, sticky="w", padx=(10, 0), pady=(5, 0))
+        tk.Entry(frm_model, textvariable=self.ortho_mat_range, width=14).grid(
+            row=2, column=3, sticky="w", padx=5, pady=(5, 0)
+        )
 
         frm_mapdl = tk.LabelFrame(self.root, text="MAPDL Launch Settings", padx=10, pady=5)
         frm_mapdl.pack(fill="x", padx=10, pady=5)
@@ -203,6 +222,22 @@ class ConverterApp:
         if path:
             self.db_path.set(path)
             self.output_dir.set(os.path.dirname(path))
+
+    def _on_db_path_change(self, *_args):
+        """Auto-toggle Sub-model when the .db filename ends with 'sub' (case-insensitive)."""
+        stem = os.path.splitext(os.path.basename(self.db_path.get()))[0]
+        self.is_submodel.set(stem.lower().endswith("sub"))
+
+    def _parse_ortho_mat_range(self):
+        text = self.ortho_mat_range.get().strip()
+        parts = [p.strip() for p in text.replace("~", "-").split("-") if p.strip()]
+        if len(parts) != 2:
+            raise ValueError(f"Material # range must be like '9990-9999'. Got: '{text}'")
+        try:
+            lo, hi = int(parts[0]), int(parts[1])
+        except ValueError:
+            raise ValueError(f"Material # range must be like '9990-9999'. Got: '{text}'")
+        return (lo, hi) if lo <= hi else (hi, lo)
 
     def _show_step1_log(self):
         log_path = self._step1_log_path
@@ -450,6 +485,7 @@ class ConverterApp:
                 "Initial/Final Temp must be numeric. "
                 f"Got init='{self.init_temp.get()}' final='{self.final_temp.get()}'"
             )
+        ortho_mat_range = self._parse_ortho_mat_range()
 
         nodes = cdb_utils.parse_cdb_nodes(cdb_path)
         elems_by_mat = cdb_utils.parse_cdb_elements_by_mat(cdb_path)
@@ -487,6 +523,8 @@ class ConverterApp:
             symmetry_mode=self._symmetry_key(),
             init_temp=init_temp,
             final_temp=final_temp,
+            has_orthotropic=self.has_orthotropic.get(),
+            ortho_mat_range=ortho_mat_range,
         )
         self._log(f"INP created: {inp_path}")
         self._log(

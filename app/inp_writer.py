@@ -247,15 +247,27 @@ def _write_material_orthotropic(f, props):
             f.write(f"{fmt_num(vx)}, {fmt_num(vy)}, {fmt_num(vz)}\n")
 
 
+def _is_orthotropic_mat(mid, has_orthotropic, ortho_mat_range):
+    if not has_orthotropic:
+        return False
+    lo, hi = ortho_mat_range
+    return lo <= mid <= hi
+
+
 def write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, log_fn=None,
                        is_submodel=False, symmetry_mode="quarter",
-                       init_temp=183.0, final_temp=25.0):
+                       init_temp=183.0, final_temp=25.0,
+                       has_orthotropic=True, ortho_mat_range=(9990, 9999)):
     """Write the Abaqus INP template file.
 
     ``symmetry_mode`` ("quarter" or "full") selects the NSET/BOUNDARY scheme
     used for a non-submodel run; see ``_write_nsets_full``/``_write_step_full``
     for the full-model 3-point fixation scheme. "half" is not implemented and
     must be filtered out by the caller before reaching this function.
+
+    ``has_orthotropic``/``ortho_mat_range`` select which material IDs (if
+    any) are treated as orthotropic effective materials; all others are
+    written as isotropic.
     """
     with open(inp_path, "w") as f:
         f.write("*NODE\n")
@@ -273,7 +285,7 @@ def write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, 
         for mid in mat_ids:
             es = f"eset{mid}"
             mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
-            if mat.lower().startswith("mat999"):
+            if _is_orthotropic_mat(mid, has_orthotropic, ortho_mat_range):
                 eff_mats.append((es, mat))
             else:
                 f.write(f"*SOLID SECTION, ELSET={es}, MATERIAL={mat}\n")
@@ -298,7 +310,7 @@ def write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, 
             mat = mat_info.get(mid, {}).get("name", f"mat{mid}")
             f.write(f"*MATERIAL, NAME={mat}\n")
             props = mat_info.get(mid, {}).get("props", {})
-            if mat.lower().startswith("mat999"):
+            if _is_orthotropic_mat(mid, has_orthotropic, ortho_mat_range):
                 _write_material_orthotropic(f, props)
             else:
                 _write_material_isotropic(f, props)
