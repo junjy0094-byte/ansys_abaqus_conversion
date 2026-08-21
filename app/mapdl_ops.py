@@ -633,57 +633,22 @@ def remove_unused_mats(mapdl, log_fn):
     log_fn(f"  Deleted {deleted} / {len(all_mats)} unused material(s).")
 
 
-def collect_nset_data(mapdl, log_fn, is_submodel=False):
-    """Collect nset/tie metadata directly from node coordinates and components.
-
-    When ``is_submodel=True`` returns ``nset_bc_sub`` (all outermost-plane
-    nodes) instead of the three symmetry nsets, and omits tie data.
-    """
-    mapdl.allsel("ALL")
-    nnum = [int(v) for v in mapdl.mesh.nnum.tolist()]
-    coords = mapdl.mesh.nodes
-    node_xyz = {
-        int(nid): (float(xyz[0]), float(xyz[1]), float(xyz[2]))
-        for nid, xyz in zip(nnum, coords)
-    }
-    tol = 1.0e-12
-    min_x = min(v[0] for v in node_xyz.values())
-    min_y = min(v[1] for v in node_xyz.values())
-    min_z = min(v[2] for v in node_xyz.values())
-
-    if is_submodel:
-        max_x = max(v[0] for v in node_xyz.values())
-        max_y = max(v[1] for v in node_xyz.values())
-        max_z = max(v[2] for v in node_xyz.values())
-        bc_sub = sorted(
-            nid for nid, (x, y, z) in node_xyz.items()
-            if (abs(x - min_x) <= tol or abs(x - max_x) <= tol
-                or abs(y - min_y) <= tol or abs(y - max_y) <= tol
-                or abs(z - min_z) <= tol or abs(z - max_z) <= tol)
-        )
-        log_fn(f"  nset_bc_sub: {len(bc_sub)} outermost-plane node(s)")
-        mapdl.allsel("ALL")
-        return {
-            "nset_temperature": sorted(nnum),
-            "nset_bc_sub": bc_sub,
-        }
-
-    bc_x = sorted(nid for nid, (x, _, _) in node_xyz.items() if abs(x - min_x) <= tol)
-    bc_y = sorted(nid for nid, (_, y, _) in node_xyz.items() if abs(y - min_y) <= tol)
-
-    xyz_candidates = [
-        nid for nid, (x, y, z) in node_xyz.items()
-        if abs(x - min_x) <= tol and abs(y - min_y) <= tol and abs(z - min_z) <= tol
+def _find_corner_node(node_xyz, x, y, z, tol):
+    """Return the node id closest to (x, y, z); exact match within tol preferred."""
+    candidates = [
+        nid for nid, (nx, ny, nz) in node_xyz.items()
+        if abs(nx - x) <= tol and abs(ny - y) <= tol and abs(nz - z) <= tol
     ]
-    if xyz_candidates:
-        bc_all = [min(xyz_candidates)]
-    else:
-        best = min(
-            node_xyz.items(),
-            key=lambda kv: abs(kv[1][0] - min_x) + abs(kv[1][1] - min_y) + abs(kv[1][2] - min_z),
-        )[0]
-        bc_all = [best]
+    if candidates:
+        return min(candidates)
+    return min(
+        node_xyz.items(),
+        key=lambda kv: abs(kv[1][0] - x) + abs(kv[1][1] - y) + abs(kv[1][2] - z),
+    )[0]
 
+
+def _collect_tie_data(mapdl, log_fn):
+    """Detect tie master/slave element and surface-node sets (mode-independent)."""
     master = get_component_element_ids(mapdl, [
         "TIE_MASTER", "tie_master", "TIE_MAST", "MASTER_TIE", "master_tie", "MASTER_T",
         "MASTER", "master",
@@ -718,6 +683,82 @@ def collect_nset_data(mapdl, log_fn, is_submodel=False):
         f"  tie surface nodes: master={len(master_tie_nodes)} "
         f"slave={len(slave_tie_nodes)}"
     )
+    return master, slave, master_tie_nodes, slave_tie_nodes
+
+
+def collect_nset_data(mapdl, log_fn, is_submodel=False, symmetry_mode="quarter"):
+    """Collect nset/tie metadata directly from node coordinates and components.
+
+    When ``is_submodel=True`` returns ``nset_bc_sub`` (all outermost-plane
+    nodes) instead of the symmetry/full-model nsets, and omits tie data.
+
+    ``symmetry_mode`` selects the boundary-condition scheme for a
+    non-submodel run:
+      - "quarter": X=0/Y=0 symmetry planes + single corner fixation (default).
+      - "full": no symmetry: a 3-point kinematic constraint removes rigid
+        body motion (see ``_write_step_full`` in inp_writer.py for details).
+      - "half": not yet implemented; callers should not reach this branch
+        (the GUI blocks a run selecting it).
+    """
+    mapdl.allsel("ALL")
+    nnum = [int(v) for v in mapdl.mesh.nnum.tolist()]
+    coords = mapdl.mesh.nodes
+    node_xyz = {
+        int(nid): (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+        for nid, xyz in zip(nnum, coords)
+    }
+    tol = 1.0e-12
+    min_x = min(v[0] for v in node_xyz.values())
+    min_y = min(v[1] for v in node_xyz.values())
+    min_z = min(v[2] for v in node_xyz.values())
+
+    if is_submodel:
+        max_x = max(v[0] for v in node_xyz.values())
+        max_y = max(v[1] for v in node_xyz.values())
+        max_z = max(v[2] for v in node_xyz.values())
+        bc_sub = sorted(
+            nid for nid, (x, y, z) in node_xyz.items()
+            if (abs(x - min_x) <= tol or abs(x - max_x) <= tol
+                or abs(y - min_y) <= tol or abs(y - max_y) <= tol
+                or abs(z - min_z) <= tol or abs(z - max_z) <= tol)
+        )
+        log_fn(f"  nset_bc_sub: {len(bc_sub)} outermost-plane node(s)")
+        mapdl.allsel("ALL")
+        return {
+            "nset_temperature": sorted(nnum),
+            "nset_bc_sub": bc_sub,
+        }
+
+    if symmetry_mode == "full":
+        max_x = max(v[0] for v in node_xyz.values())
+        max_y = max(v[1] for v in node_xyz.values())
+        max_z = max(v[2] for v in node_xyz.values())
+        p_fixall = _find_corner_node(node_xyz, min_x, min_y, min_z, tol)
+        p_fixyz = _find_corner_node(node_xyz, max_x, min_y, min_z, tol)
+        p_fixz = _find_corner_node(node_xyz, min_x, max_y, min_z, tol)
+        log_fn(
+            f"  full-model fixation nodes: all-fixed={p_fixall}, "
+            f"uy/uz-fixed={p_fixyz}, uz-fixed={p_fixz}"
+        )
+        master, slave, master_tie_nodes, slave_tie_nodes = _collect_tie_data(mapdl, log_fn)
+        mapdl.allsel("ALL")
+        return {
+            "nset_temperature": sorted(nnum),
+            "nset_bc_fixall": [p_fixall],
+            "nset_bc_fixyz": [p_fixyz],
+            "nset_bc_fixz": [p_fixz],
+            "master_tie": master,
+            "slave_tie": slave,
+            "master_tie_nodes": master_tie_nodes,
+            "slave_tie_nodes": slave_tie_nodes,
+        }
+
+    # quarter (default)
+    bc_x = sorted(nid for nid, (x, _, _) in node_xyz.items() if abs(x - min_x) <= tol)
+    bc_y = sorted(nid for nid, (_, y, _) in node_xyz.items() if abs(y - min_y) <= tol)
+    bc_all = [_find_corner_node(node_xyz, min_x, min_y, min_z, tol)]
+
+    master, slave, master_tie_nodes, slave_tie_nodes = _collect_tie_data(mapdl, log_fn)
     mapdl.allsel("ALL")
 
     return {
@@ -733,7 +774,7 @@ def collect_nset_data(mapdl, log_fn, is_submodel=False):
 
 
 def dump_mapdl_mplist(mapdl, mplist_path):
-    """Export MPLIST to a text file for Step 4 material processing."""
+    """Export MPLIST to a text file for Step 2 material processing."""
     macro_path = os.path.join(mapdl.directory, "_dump_mplist_for_step4.mac")
     with open(macro_path, "w") as f:
         f.write("/OUTPUT,_mplist_step4,txt\n")

@@ -248,8 +248,15 @@ def _write_material_orthotropic(f, props):
 
 
 def write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, log_fn=None,
-                       is_submodel=False):
-    """Write the Abaqus INP template file."""
+                       is_submodel=False, symmetry_mode="quarter",
+                       init_temp=183.0, final_temp=25.0):
+    """Write the Abaqus INP template file.
+
+    ``symmetry_mode`` ("quarter" or "full") selects the NSET/BOUNDARY scheme
+    used for a non-submodel run; see ``_write_nsets_full``/``_write_step_full``
+    for the full-model 3-point fixation scheme. "half" is not implemented and
+    must be filtered out by the caller before reaching this function.
+    """
     with open(inp_path, "w") as f:
         f.write("*NODE\n")
         for nid in sorted(nodes):
@@ -281,7 +288,10 @@ def write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, 
         if is_submodel:
             _write_nsets_submodel(f, nsets)
         else:
-            _write_nsets_standard(f, nsets)
+            if symmetry_mode == "full":
+                _write_nsets_full(f, nsets)
+            else:
+                _write_nsets_quarter(f, nsets)
             _write_tie_sections(f, nsets, nodes, elems_by_mat, log_fn)
 
         for mid in mat_ids:
@@ -294,14 +304,29 @@ def write_template_inp(inp_path, nodes, elems_by_mat, mat_ids, nsets, mat_info, 
                 _write_material_isotropic(f, props)
 
         if is_submodel:
-            _write_step_submodel(f)
+            _write_step_submodel(f, init_temp, final_temp)
         else:
-            _write_step_standard(f)
+            if symmetry_mode == "full":
+                _write_step_full(f, init_temp, final_temp)
+            else:
+                _write_step_quarter(f, init_temp, final_temp)
 
 
-def _write_nsets_standard(f, nsets):
-    """Write the four symmetry NSETs for a regular (non-submodel) model."""
+def _write_nsets_quarter(f, nsets):
+    """Write the four symmetry NSETs for a quarter-symmetry (non-submodel) model."""
     for ns in ["nset_temperature", "nset_bc_y", "nset_bc_x", "nset_bc_all"]:
+        f.write(f"*NSET, NSET={ns}\n")
+        ids = nsets.get(ns, [])
+        for k in range(0, len(ids), 16):
+            f.write(", ".join(str(v) for v in ids[k:k + 16]) + "\n")
+        if not ids:
+            f.write("** TODO: fill node IDs\n")
+
+
+def _write_nsets_full(f, nsets):
+    """Write NSETs for a full (non-symmetric) model: temperature + the
+    3-point rigid-body-motion fixation nsets (see _write_step_full)."""
+    for ns in ["nset_temperature", "nset_bc_fixall", "nset_bc_fixyz", "nset_bc_fixz"]:
         f.write(f"*NSET, NSET={ns}\n")
         ids = nsets.get(ns, [])
         for k in range(0, len(ids), 16):
@@ -363,17 +388,17 @@ def _write_tie_sections(f, nsets, nodes, elems_by_mat, log_fn):
     _write_tie_plane_section(f, "slave", slave_eids, slave_planes)
 
 
-def _write_step_standard(f):
-    """Write the STEP block for a regular model."""
+def _write_step_quarter(f, init_temp, final_temp):
+    """Write the STEP block for a quarter-symmetry model."""
     f.write("*TIE, NAME=tie-1\n")
     f.write("slave_tie, master_tie\n")
     f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
-    f.write("NSET_TEMPERATURE,183.0\n")
+    f.write(f"NSET_TEMPERATURE,{fmt_num(init_temp)}\n")
     f.write("*STEP, INC=10000, NAME=step, NLGEOM=NO\n")
     f.write("*STATIC\n")
     f.write("1.0, 1.0, 1.0e-15, 1.0\n")
     f.write("*TEMPERATURE, OP=NEW\n")
-    f.write("NSET_TEMPERATURE, 25.0\n")
+    f.write(f"NSET_TEMPERATURE, {fmt_num(final_temp)}\n")
     f.write("*BOUNDARY\n")
     f.write("NSET_BC_Y,YSYMM\n")
     f.write("NSET_BC_X,XSYMM\n")
@@ -381,15 +406,39 @@ def _write_step_standard(f):
     f.write("*END STEP\n")
 
 
-def _write_step_submodel(f):
-    """Write the STEP block for a submodel."""
+def _write_step_full(f, init_temp, final_temp):
+    """Write the STEP block for a full (non-symmetric) model.
+
+    Rigid-body motion is removed with a 3-point kinematic constraint instead
+    of symmetry planes: the (minX,minY,minZ) node is fully fixed, the
+    (maxX,minY,minZ) node is fixed in Uy/Uz, and the (minX,maxY,minZ) node
+    is fixed in Uz.
+    """
+    f.write("*TIE, NAME=tie-1\n")
+    f.write("slave_tie, master_tie\n")
     f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
-    f.write("NSET_TEMPERATURE,183.0\n")
+    f.write(f"NSET_TEMPERATURE,{fmt_num(init_temp)}\n")
     f.write("*STEP, INC=10000, NAME=step, NLGEOM=NO\n")
     f.write("*STATIC\n")
     f.write("1.0, 1.0, 1.0e-15, 1.0\n")
     f.write("*TEMPERATURE, OP=NEW\n")
-    f.write("NSET_TEMPERATURE, 25.0\n")
+    f.write(f"NSET_TEMPERATURE, {fmt_num(final_temp)}\n")
+    f.write("*BOUNDARY\n")
+    f.write("NSET_BC_FIXALL,1,3\n")
+    f.write("NSET_BC_FIXYZ,2,3\n")
+    f.write("NSET_BC_FIXZ,3,3\n")
+    f.write("*END STEP\n")
+
+
+def _write_step_submodel(f, init_temp, final_temp):
+    """Write the STEP block for a submodel."""
+    f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\n")
+    f.write(f"NSET_TEMPERATURE,{fmt_num(init_temp)}\n")
+    f.write("*STEP, INC=10000, NAME=step, NLGEOM=NO\n")
+    f.write("*STATIC\n")
+    f.write("1.0, 1.0, 1.0e-15, 1.0\n")
+    f.write("*TEMPERATURE, OP=NEW\n")
+    f.write(f"NSET_TEMPERATURE, {fmt_num(final_temp)}\n")
     f.write("*boundary, submodel, step=1\n")
     f.write("NSET_BC_Sub,1,1\n")
     f.write("NSET_BC_Sub,2,2\n")
