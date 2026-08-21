@@ -1,5 +1,14 @@
 from .utils import fmt_num, prop_rows, value_for_temp, temps_from_rows
 
+
+def _cte_rows(props, axis):
+    """CTE property rows for one axis: prefer CTEx/y/z, fall back to ALPx/y/z."""
+    rows = prop_rows(props, f"cte{axis}")
+    if rows:
+        return rows
+    return prop_rows(props, f"alp{axis}")
+
+
 # Abaqus C3D8 local face → local node indices (0-based).
 _C3D8_FACES = (
     (1, (0, 1, 2, 3)),  # S1: 1-2-3-4  (bottom)
@@ -167,7 +176,7 @@ def _write_tie_plane_section(f, side, tie_eids, plane_groups):
 def _write_material_isotropic(f, props):
     ex_rows = prop_rows(props, "ex")
     nu_rows = prop_rows(props, "nuxy")
-    alpha_rows = prop_rows(props, "alpx")
+    alpha_rows = _cte_rows(props, "x")
 
     elastic_temps = temps_from_rows(ex_rows + nu_rows)
     f.write("*ELASTIC\n")
@@ -223,9 +232,9 @@ def _write_material_orthotropic(f, props):
             f.write(", ".join(fmt_num(v) for v in vals[:8]) + "\n")
             f.write(f"{fmt_num(vals[8])}\n")
 
-    ctex_rows = prop_rows(props, "alpx")
-    ctey_rows = prop_rows(props, "alpy")
-    ctez_rows = prop_rows(props, "alpz")
+    ctex_rows = _cte_rows(props, "x")
+    ctey_rows = _cte_rows(props, "y")
+    ctez_rows = _cte_rows(props, "z")
     cte_temps = temps_from_rows(ctex_rows + ctey_rows + ctez_rows)
 
     f.write("*EXPANSION, TYPE=ORTHOTROPIC\n")

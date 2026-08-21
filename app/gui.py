@@ -18,6 +18,8 @@ ANSYS -> Abaqus Converter : 참고 사항 (Notes)
      (ENGINEERING CONSTANTS + ORTHOTROPIC EXPANSION)으로 처리되고, 범위 밖 재질은
      등방성으로 처리됩니다. 해당 번호대의 재질을 ANSYS에 미리 정의해 두어야 합니다.
    - 범위는 Model Configuration에서 "9990-9999"처럼 직접 수정할 수 있습니다.
+   - CTE(열팽창계수) 값은 CTEX/CTEY/CTEZ를 먼저 찾고, 없으면 ALPX/ALPY/ALPZ 값을
+     사용합니다 (등방성 재질은 X축 값만 사용).
 
 2. 좌표 스케일 (Scale)
    - 노드 좌표는 항상 x1000 배율이 자동 적용됩니다 (예: ANSYS 모델 단위가 m일 때
